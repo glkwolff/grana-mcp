@@ -23,6 +23,7 @@ from grana_mcp import config
 from grana_mcp.server import GranaTools
 from grana_mcp.web import auth
 from grana_mcp.web.claude_runner import RunnerConfig, prepare, run_turn
+from grana_mcp.web.limits import AuthGuard, ChatLimits
 
 MAX_MESSAGE = 2000
 STATIC_DIR = Path(__file__).parent / "static"  # built by web-ui/ (npm run build)
@@ -47,39 +48,62 @@ class Session:
 @dataclass
 class State:
     runner: RunnerConfig
+    limits: ChatLimits = field(default_factory=ChatLimits)
+    guard: AuthGuard = field(default_factory=AuthGuard)
     sessions: dict[str, Session] = field(default_factory=dict)
 
     def session(self, user: str) -> Session:
         return self.sessions.setdefault(user, Session())
 
 
-async def _user(request: Request) -> str | None:
+class Denied(Exception):
+    def __init__(self, response: Response) -> None:
+        self.response = response
+
+
+def _too_many(message: str, wait: int) -> JSONResponse:
+    return JSONResponse(
+        {"error": message, "retry_after": wait},
+        status_code=429,
+        headers={**SECURITY_HEADERS, "Retry-After": str(wait)},
+    )
+
+
+async def _user(request: Request, state: State) -> str:
+    """The authenticated user, or raises ``Denied`` (401, or 429 when the IP is blocked)."""
+    ip = request.client.host if request.client else "?"
+    wait = state.guard.blocked(ip)
+    if wait:
+        raise Denied(_too_many("muitas tentativas com token errado; espere", wait))
     header = request.headers.get("authorization", "")
     token = header[7:].strip() if header.lower().startswith("bearer ") else None
     user = auth.verify(token)
     if user is None:
+        state.guard.failed(ip)
         await asyncio.sleep(0.5)  # slow down guessing (tokens are 256-bit anyway)
+        raise Denied(
+            JSONResponse({"error": "não autorizado"}, status_code=401, headers=SECURITY_HEADERS)
+        )
+    state.guard.succeeded(ip)
     return user
 
 
-def _unauthorized() -> JSONResponse:
-    return JSONResponse({"error": "não autorizado"}, status_code=401, headers=SECURITY_HEADERS)
-
-
-def create_app(runner: RunnerConfig | None = None) -> Starlette:
-    state = State(runner or RunnerConfig())
+def create_app(runner: RunnerConfig | None = None, limits: ChatLimits | None = None) -> Starlette:
+    state = State(runner or RunnerConfig(), limits or ChatLimits())
     prepare(state.runner)
 
     async def me(request: Request) -> Response:
-        user = await _user(request)
-        if user is None:
-            return _unauthorized()
+        try:
+            user = await _user(request, state)
+        except Denied as d:
+            return d.response
         return JSONResponse({"user": user}, headers=SECURITY_HEADERS)
 
     async def board_view(request: Request) -> Response:
-        user = await _user(request)
-        if user is None:
-            return _unauthorized()
+        try:
+            await _user(request, state)
+        except Denied as d:
+            return d.response
         try:
             data = GranaTools(config.db_path()).board()
         except ToolError as exc:
@@ -87,16 +111,18 @@ def create_app(runner: RunnerConfig | None = None) -> Starlette:
         return JSONResponse(data, headers=SECURITY_HEADERS)
 
     async def new_chat(request: Request) -> Response:
-        user = await _user(request)
-        if user is None:
-            return _unauthorized()
+        try:
+            user = await _user(request, state)
+        except Denied as d:
+            return d.response
         state.sessions.pop(user, None)
         return JSONResponse({"ok": True}, headers=SECURITY_HEADERS)
 
     async def chat(request: Request) -> Response:
-        user = await _user(request)
-        if user is None:
-            return _unauthorized()
+        try:
+            user = await _user(request, state)
+        except Denied as d:
+            return d.response
         try:
             body = await request.json()
             message = str(body.get("message", "")).strip()
@@ -114,6 +140,13 @@ def create_app(runner: RunnerConfig | None = None) -> Starlette:
                 {"error": "espere a resposta anterior terminar"},
                 status_code=409,
                 headers=SECURITY_HEADERS,
+            )
+        wait = state.limits.take(user)
+        if wait:
+            return _too_many(
+                f"limite de perguntas atingido ({state.limits.per_hour}/hora, "
+                f"{state.limits.per_day}/dia); tente de novo em {wait // 60 + 1} min",
+                wait,
             )
 
         async def stream() -> AsyncIterator[bytes]:

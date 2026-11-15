@@ -216,3 +216,63 @@ def test_board_api_and_actor_config(client: TestClient, tmp_path: Path) -> None:
     client.post("/api/chat", json={"message": "oi"}, headers=h)
     cfg = json.loads((tmp_path / "work" / "grana-mcp-bia.json").read_text())
     assert cfg["mcpServers"]["grana"]["env"]["GRANA_ACTOR"] == "bia"
+
+
+# --- rate limits ---
+
+
+def test_window_and_chat_limits() -> None:
+    from grana_mcp.web.limits import ChatLimits
+
+    now = [1000.0]
+    lim = ChatLimits(per_hour=2, per_day=3, clock=lambda: now[0])
+    assert lim.take("ana") == 0 and lim.take("ana") == 0
+    wait = lim.take("ana")
+    assert 0 < wait <= 3601
+    assert lim.take("bia") == 0  # per user
+    now[0] += 3601
+    assert lim.take("ana") == 0
+    now[0] += 10
+    assert lim.take("ana") > 3600  # daily limit (3) reached
+
+
+def test_auth_guard_blocks_after_failures() -> None:
+    from grana_mcp.web.limits import AuthGuard
+
+    now = [0.0]
+    g = AuthGuard(max_failures=3, window=60, block_seconds=100, clock=lambda: now[0])
+    for _ in range(2):
+        g.failed("1.2.3.4")
+    assert g.blocked("1.2.3.4") == 0
+    g.failed("1.2.3.4")
+    assert 0 < g.blocked("1.2.3.4") <= 101
+    assert g.blocked("5.6.7.8") == 0
+    now[0] += 101
+    assert g.blocked("1.2.3.4") == 0
+    g.failed("9.9.9.9")
+    g.succeeded("9.9.9.9")
+    g.failed("9.9.9.9")
+    g.failed("9.9.9.9")
+    assert g.blocked("9.9.9.9") == 0  # success resets the count
+
+
+def test_chat_rate_limit_and_ip_block(fake_claude: Path, tmp_path: Path) -> None:
+    from grana_mcp.web.limits import AuthGuard, ChatLimits
+
+    cfg = cr.RunnerConfig(claude_bin=str(fake_claude), workdir=tmp_path / "w")
+    app = create_app(cfg, ChatLimits(per_hour=1, per_day=10))
+    client = TestClient(app)
+    h = {"Authorization": f"Bearer {auth.add_user('ana')}"}
+    assert client.post("/api/chat", json={"message": "a"}, headers=h).status_code == 200
+    limited = client.post("/api/chat", json={"message": "b"}, headers=h)
+    assert limited.status_code == 429
+    assert int(limited.headers["retry-after"]) > 0
+    assert "limite" in limited.json()["error"]
+    # invalid messages do not spend quota
+    assert client.post("/api/chat", json={"message": ""}, headers=h).status_code == 400
+
+    bad = {"Authorization": "Bearer errado"}
+    for _ in range(AuthGuard().max_failures):
+        assert client.get("/api/me", headers=bad).status_code == 401
+    blocked = client.get("/api/me", headers=h)  # same IP, even with a good token
+    assert blocked.status_code == 429

@@ -719,11 +719,14 @@ def web_serve(
     allow_any_interface: Annotated[
         bool, typer.Option(help="Permite 0.0.0.0 (ex.: dentro de um container).")
     ] = False,
+    max_per_hour: Annotated[int, typer.Option(help="Perguntas por pessoa por hora.")] = 30,
+    max_per_day: Annotated[int, typer.Option(help="Perguntas por pessoa por dia.")] = 150,
 ) -> None:
     """Sobe o chat web. Escute só no IP do WireGuard (ou 127.0.0.1); nunca na internet."""
     from grana_mcp.web import auth
     from grana_mcp.web.app import create_app
     from grana_mcp.web.claude_runner import RunnerConfig
+    from grana_mcp.web.limits import ChatLimits
 
     if host in ANY_INTERFACE and not allow_any_interface:
         typer.echo(
@@ -739,7 +742,7 @@ def web_serve(
 
     typer.echo(f"Chat em http://{host}:{port}  (usuários: {', '.join(auth.users())})")
     uvicorn.run(
-        create_app(RunnerConfig(model=model)),
+        create_app(RunnerConfig(model=model), ChatLimits(max_per_hour, max_per_day)),
         host=host,
         port=port,
         log_level="warning",
