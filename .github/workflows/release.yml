@@ -1,0 +1,50 @@
+# Publica no PyPI e no registro oficial de MCP quando uma tag vX.Y.Z é enviada.
+# Sem tokens guardados: usa Trusted Publishing (OIDC) nos dois.
+# Antes da primeira vez:
+#   1. pypi.org -> Publishing -> "Add a new pending publisher": projeto grana-mcp,
+#      owner glkwolff, repo grana-mcp, workflow release.yml, environment pypi.
+#   2. GitHub -> Settings -> Environments -> criar "pypi".
+#   3. A versão em pyproject.toml e server.json precisa bater com a tag.
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+
+jobs:
+  pypi:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: "3.12"
+      - name: Versões batem com a tag
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          grep -q "^version = \"$tag\"" pyproject.toml
+          grep -q "\"version\": \"$tag\"" server.json
+      - run: uv sync --locked
+      - run: uv run pytest -q
+      - run: uv build
+      - uses: pypa/gh-action-pypi-publish@v1.14.3
+
+  mcp-registry:
+    needs: pypi
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Instala mcp-publisher
+        run: |
+          curl -fsSL https://github.com/modelcontextprotocol/registry/releases/download/v1.8.9/mcp-publisher_linux_amd64.tar.gz | tar xz mcp-publisher
+      - run: ./mcp-publisher validate server.json
+      - run: ./mcp-publisher login github-oidc
+      - run: ./mcp-publisher publish
