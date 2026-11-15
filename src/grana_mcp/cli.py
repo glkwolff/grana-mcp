@@ -7,10 +7,14 @@ Never prints secrets. Output is PT-BR.
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
+import stat
+import webbrowser
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Annotated
 
 import keyring.errors
@@ -30,6 +34,8 @@ from grana_mcp.pipeline.categorize import (
 )
 from grana_mcp.pipeline.dedupe import DedupeResult, run_dedupe
 from grana_mcp.privacy.documents import parse_document
+from grana_mcp.providers import ofx
+from grana_mcp.providers.base import Item
 from grana_mcp.providers.pluggy import PluggyAuthError, PluggyClient, PluggyError
 from grana_mcp.store import db
 from grana_mcp.sync import sync_profile, today_sp
@@ -40,7 +46,10 @@ app = typer.Typer(
     help="grana-mcp: finanças pessoais via Open Finance (Meu Pluggy), somente leitura.",
     no_args_is_help=True,
 )
-profile_app = typer.Typer(help="Gerencia perfis (uma pessoa = um perfil).", no_args_is_help=True)
+profile_app = typer.Typer(
+    help="Perfis: credenciais da Pluggy e itemIds (um perfil pode ter contas de várias pessoas).",
+    no_args_is_help=True,
+)
 app.add_typer(profile_app, name="profile")
 person_app = typer.Typer(
     help="Pessoas da casa (donas das contas; um perfil pode ter várias).", no_args_is_help=True
@@ -491,6 +500,201 @@ def category_remove(rule_id: int) -> None:
             raise typer.Exit(1)
         typer.echo(f"Regra {rule_id} removida.")
         _echo_categorize(store.conn)
+
+
+# --- file import (OFX / CSV) ---
+
+
+def _import_statement(stmt: ofx.Statement, profile: str, person: str | None) -> None:
+    with store_session() as store:
+        cfg = config.get_profile(profile)
+        name = cfg.display_name if cfg else profile
+        store.upsert_profile(profile, name)
+        store.upsert_item(
+            profile,
+            Item(
+                id=stmt.account.item_id,
+                connector_name="Arquivo (OFX/CSV)",
+                status="FILE",
+                consent_expires_at=None,
+                last_updated_at=None,
+            ),
+        )
+        store.upsert_account(stmt.account)
+        counts = store.upsert_transactions(profile, stmt.transactions, source="ofx")
+        store.mark_item_synced(stmt.account.item_id)
+        if person:
+            people = db.People(store.conn, store.salt)
+            row = _person_or_exit(people, person)
+            people.assign(stmt.account.id, row["id"])
+        store.conn.commit()
+        typer.echo(
+            f"{stmt.account.name}: {len(stmt.transactions)} transações lidas; "
+            f"{counts.new} novas, {counts.updated} atualizadas."
+        )
+        _run_pipeline(store.conn)
+
+
+@app.command("import-ofx")
+def import_ofx(
+    path: Path,
+    profile: Annotated[str, typer.Option(help="Perfil dono do arquivo (ex.: ana).")],
+    label: Annotated[str | None, typer.Option(help="Nome da conta (opcional).")] = None,
+    person: Annotated[str | None, typer.Option(help="Pessoa dona da conta (opcional).")] = None,
+) -> None:
+    """Importa um extrato OFX (conta ou cartão). Sem rede; reimportar não duplica.
+
+    Não importe uma conta que também é sincronizada pela Pluggy: contaria tudo duas vezes.
+    """
+    try:
+        stmt = ofx.parse_ofx(ofx.read_text(path), config.slugify(profile), label)
+    except (ofx.ImportFormatError, OSError) as exc:
+        typer.echo(f"Não consegui ler o OFX: {exc}", err=True)
+        raise typer.Exit(1) from None
+    _import_statement(stmt, config.slugify(profile), person)
+
+
+@app.command("import-csv")
+def import_csv(
+    path: Path,
+    profile: Annotated[str, typer.Option(help="Perfil dono do arquivo (ex.: ana).")],
+    fmt: Annotated[
+        str, typer.Option("--format", help="nubank-cartao | nubank-conta | generic")
+    ] = "generic",
+    label: Annotated[str | None, typer.Option(help="Nome da conta (opcional).")] = None,
+    person: Annotated[str | None, typer.Option(help="Pessoa dona da conta (opcional).")] = None,
+    invert: Annotated[bool, typer.Option(help="Inverte o sinal dos valores.")] = False,
+) -> None:
+    """Importa um CSV exportado do banco. Sem rede; reimportar não duplica."""
+    if fmt not in ofx.CSV_FORMATS:
+        typer.echo(f"--format deve ser um de: {', '.join(ofx.CSV_FORMATS)}", err=True)
+        raise typer.Exit(1)
+    try:
+        stmt = ofx.parse_csv(
+            ofx.read_text(path),
+            config.slugify(profile),
+            fmt,
+            label,
+            invert=invert,
+        )
+    except (ofx.ImportFormatError, OSError) as exc:
+        typer.echo(f"Não consegui ler o CSV: {exc}", err=True)
+        raise typer.Exit(1) from None
+    _import_statement(stmt, config.slugify(profile), person)
+
+
+# --- doctor ---
+
+SECRET_ENV_VARS = (config.ENV_CLIENT_SECRET,)
+
+
+def _check(ok: bool | None, msg: str) -> bool:
+    mark = {True: "ok ", False: "ERRO", None: "aviso"}[ok]
+    typer.echo(f"[{mark}] {msg}")
+    return ok is not False
+
+
+@app.command()
+def doctor(
+    offline: Annotated[bool, typer.Option(help="Não testa a autenticação na Pluggy.")] = False,
+) -> None:
+    """Checa credenciais, autorização, permissões do banco e versão do schema."""
+    healthy = True
+    profiles = config.load_profiles()
+    healthy &= _check(bool(profiles) or None, f"{len(profiles)} perfil(is) configurado(s)")
+    for var in SECRET_ENV_VARS:
+        if os.environ.get(var):
+            _check(None, f"{var} está no ambiente: prefira o keyring ('grana-mcp profile add')")
+    for p in profiles:
+        try:
+            creds = config.load_credentials(p.id)
+        except CredentialsNotFoundError:
+            healthy &= _check(False, f"perfil {p.id}: credenciais não encontradas")
+            continue
+        _check(True, f"perfil {p.id}: credenciais encontradas")
+        if offline:
+            continue
+        try:
+            with make_client(creds) as client:
+                client.authenticate()
+                for item_id in p.item_ids:
+                    item = client.get_item(item_id)
+                    exp = item.consent_expires_at
+                    if exp is None:
+                        _check(None, f"item {item_id}: sem data de expiração da autorização")
+                        continue
+                    days = (exp - datetime.now(UTC)).days
+                    ok = None if days <= 30 else True
+                    healthy &= _check(
+                        False if days < 0 else ok,
+                        f"item {item_id}: {item.status or '?'}; autorização expira em "
+                        f"{exp.date().isoformat()} ({days} dias)",
+                    )
+        except PluggyAuthError:
+            healthy &= _check(False, f"perfil {p.id}: a Pluggy recusou o Client ID/Secret")
+        except PluggyError as exc:
+            healthy &= _check(False, f"perfil {p.id}: erro na Pluggy ({exc.status})")
+    path = config.db_path()
+    if not path.exists():
+        healthy &= _check(False, "banco de dados não existe; rode 'grana-mcp sync'")
+    else:
+        mode = stat.S_IMODE(path.stat().st_mode)
+        healthy &= _check(mode & 0o077 == 0 or False, f"permissões do banco: {oct(mode)}")
+        dmode = stat.S_IMODE(path.parent.stat().st_mode)
+        healthy &= _check(dmode & 0o077 == 0 or False, f"permissões da pasta: {oct(dmode)}")
+        conn = db.connect(path)
+        try:
+            version = db.schema_version(conn)
+            last = conn.execute(
+                "SELECT MAX(finished_at) FROM sync_runs WHERE status='ok'"
+            ).fetchone()
+        finally:
+            conn.close()
+        healthy &= _check(version == db.LATEST_VERSION, f"schema v{version}")
+        _check(
+            bool(last and last[0]) or None,
+            f"último sync ok: {last[0] if last and last[0] else 'nunca'}",
+        )
+    if not healthy:
+        raise typer.Exit(1)
+
+
+# --- init ---
+
+MEU_PLUGGY_URL = "https://meu.pluggy.ai"
+DASHBOARD_URL = "https://dashboard.pluggy.ai"
+
+
+@app.command()
+def init(
+    open_browser: Annotated[bool, typer.Option(help="Abre as páginas no navegador.")] = True,
+) -> None:
+    """Assistente: Meu Pluggy -> credenciais -> primeiro sync -> comando do cliente MCP."""
+    typer.echo(
+        "grana-mcp: suas finanças no seu computador, via Open Finance (Meu Pluggy, gratuito "
+        "para uso pessoal).\n\n"
+        f"1) Em {MEU_PLUGGY_URL}, crie a conta e conecte seus bancos (cada banco é autorizado "
+        "no app dele; escolha 12 meses).\n"
+        f"2) Em {DASHBOARD_URL}, entre com o MESMO e-mail. Em 'Aplicações', crie uma aplicação "
+        "(desenvolvimento serve; não precisa ir para produção) e guarde o Client ID e o Client "
+        "Secret (o secret só aparece uma vez).\n"
+        "3) Clique no ▶ (Demo) dessa aplicação, escolha o conector 'MeuPluggy', faça login e "
+        "autorize. Anote o itemId de cada banco (formato UUID).\n"
+        "   Os itemIds precisam ser da MESMA aplicação do Client ID.\n"
+    )
+    if open_browser and typer.confirm("Abrir essas páginas no navegador?", default=True):
+        for url in (MEU_PLUGGY_URL, DASHBOARD_URL):
+            webbrowser.open(url)
+    typer.confirm("Terminou os passos 1 a 3?", default=True, abort=True)
+    profile_add(display_name=None, profile_id=None, item_ids=None)
+    typer.echo("\nPrimeiro sync (pode levar alguns minutos)...")
+    sync(profile=None, identity=True)
+    typer.echo(
+        "\nPronto. Para usar no Claude Code:\n"
+        "  claude mcp add grana -- uvx grana-mcp serve\n"
+        "Depois, pergunte por exemplo: 'quanto gastamos por categoria no mês passado?'.\n"
+        "Para manter os dados atualizados, agende 'grana-mcp sync' 1x por dia (cron/systemd)."
+    )
 
 
 @app.command()

@@ -205,3 +205,30 @@ def test_sync_no_identity_flag(fake: FakePluggy) -> None:
     fake.identity = {"document": "0" * 11}
     out = runner.invoke(cli.app, ["sync"])
     assert "1 documento(s) de titular aprendido(s)" in out.output
+
+
+def test_doctor_online(fake: FakePluggy, monkeypatch: pytest.MonkeyPatch) -> None:
+    _add_profile()
+    runner.invoke(cli.app, ["sync"])
+    monkeypatch.setenv(config.ENV_CLIENT_SECRET, "x")
+    result = runner.invoke(cli.app, ["doctor"])
+    assert "credenciais encontradas" in result.output
+    assert "autorização expira em" in result.output
+    assert "prefira o keyring" in result.output
+    assert "último sync ok" in result.output
+    assert CLIENT_SECRET not in result.output
+
+
+def test_init_wizard(fake: FakePluggy, monkeypatch: pytest.MonkeyPatch) -> None:
+    opened: list[str] = []
+    monkeypatch.setattr("webbrowser.open", opened.append)
+    result = runner.invoke(
+        cli.app,
+        ["init"],
+        input=f"y\ny\nAna Sintética\n{CLIENT_ID}\n{CLIENT_SECRET}\n{ITEM_ID}\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert opened == [cli.MEU_PLUGGY_URL, cli.DASHBOARD_URL]
+    assert "8 novas" in result.output
+    assert "claude mcp add grana -- uvx grana-mcp serve" in result.output
+    assert CLIENT_SECRET not in result.output

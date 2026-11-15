@@ -1,0 +1,20 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "name": "io.github.glkwolff/grana-mcp",
+  "title": "grana-mcp",
+  "description": "Finanças pessoais no Brasil via Open Finance (Meu Pluggy): local, somente leitura, agregados por padrão.",
+  "repository": {
+    "url": "https://github.com/glkwolff/grana-mcp",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "grana-mcp",
+      "version": "0.1.0",
+      "transport": { "type": "stdio" },
+      "packageArguments": [{ "type": "positional", "value": "serve" }]
+    }
+  ]
+}

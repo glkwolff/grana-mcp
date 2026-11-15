@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from importlib import resources
 from pathlib import Path
+from typing import Literal
 
 from grana_mcp.config import ensure_private_dir
 from grana_mcp.providers.base import Account, Bill, Item, Transaction
@@ -179,9 +180,14 @@ class Store:
         )
 
     def upsert_transactions(
-        self, profile_id: str, transactions: Iterable[Transaction]
+        self,
+        profile_id: str,
+        transactions: Iterable[Transaction],
+        source: Literal["pluggy", "ofx"] = "pluggy",
     ) -> UpsertCounts:
-        """Insert or update by provider id. Re-syncing never duplicates rows."""
+        """Insert or update by provider id. Re-syncing never duplicates rows.
+
+        ``source='ofx'`` marks rows imported from a file (OFX or CSV)."""
         counts = UpsertCounts()
         synced_at = now_utc()
         cols = ", ".join(_TX_PROVIDER_COLUMNS)
@@ -208,8 +214,8 @@ class Store:
             if existing is None:
                 self.conn.execute(
                     f"INSERT INTO transactions (id, {cols}, source, synced_at) "  # noqa: S608
-                    f"VALUES (?, {', '.join('?' * len(values))}, 'pluggy', ?)",
-                    (tx.id, *values, synced_at),
+                    f"VALUES (?, {', '.join('?' * len(values))}, ?, ?)",
+                    (tx.id, *values, source, synced_at),
                 )
                 counts.new += 1
             elif tuple(existing) != values:

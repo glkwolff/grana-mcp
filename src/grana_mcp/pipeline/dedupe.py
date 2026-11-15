@@ -86,6 +86,8 @@ TRANSFER_CATEGORIES = frozenset({"transfers", "same person transfer", "third-par
 TRANSFER_CATEGORY_PREFIXES = ("transfer - ", "same person transfer - ")
 
 _BILL_DESC_RE = re.compile(r"\b(pagamento|pagto|pgto|pag)\.?\s+(d[ae]\s+)?fatura\b")
+# Card-side credit as written in bank exports (e.g. Nubank card CSV: "Pagamento recebido").
+_CARD_PAYMENT_DESC_RE = re.compile(r"^pagamento recebido\b")
 _INVEST_DESC_RE = re.compile(
     r"^(aplicacao|resgate)\b.*\b(rdb|cdb|lci|lca|caixinha|caixinhas|poupanca|tesouro|fundo)\b"
 )
@@ -142,7 +144,11 @@ class DedupeResult:
 def is_card_payment_credit(r: Row) -> bool:
     if not r.is_card or r.cents <= 0:
         return False
-    return r.op == PAYMENT_OPERATION or r.category == PAYMENT_CATEGORY
+    return (
+        r.op == PAYMENT_OPERATION
+        or r.category == PAYMENT_CATEGORY
+        or bool(_CARD_PAYMENT_DESC_RE.search(fold(r.description)))
+    )
 
 
 def is_checking_bill_payment(r: Row) -> bool:
