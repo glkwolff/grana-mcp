@@ -10,9 +10,10 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 
 from grana_mcp.config import Profile
+from grana_mcp.pipeline.dedupe import DedupeResult, run_dedupe
 from grana_mcp.providers.base import Account, Provider
 from grana_mcp.providers.pluggy import SAO_PAULO, PluggyError
-from grana_mcp.store.db import Store
+from grana_mcp.store.db import People, Store
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +32,8 @@ class SyncResult:
     sign_mismatches: int = 0
     bills_new: int = 0
     bills_updated: int = 0
+    identities_learned: int = 0
+    dedupe: DedupeResult | None = None
     warnings: list[str] = field(default_factory=list)
 
 
@@ -52,8 +55,36 @@ def _sync_bills(store: Store, provider: Provider, account: Account, result: Sync
     result.bills_updated += counts.updated
 
 
+def _learn_identity(
+    store: Store, provider: Provider, profile: Profile, item_id: str, result: SyncResult
+) -> None:
+    """Hash of the item holder's CPF/CNPJ -> household docs (once per item).
+
+    Best effort: any provider error other than an auth failure only warns.
+    """
+    people = People(store.conn, store.salt)
+    if people.has_item_identity(item_id):
+        return
+    try:
+        digits = provider.get_identity_document(item_id)
+    except PluggyError as exc:
+        if exc.status == 401:
+            raise
+        result.warnings.append(f"item {item_id}: identity unavailable ({exc.status})")
+        return
+    if digits is None:
+        return
+    people.set_item_identity(item_id, digits, profile.id)
+    result.identities_learned += 1
+
+
 def sync_profile(
-    store: Store, provider: Provider, profile: Profile, *, today: date | None = None
+    store: Store,
+    provider: Provider,
+    profile: Profile,
+    *,
+    today: date | None = None,
+    identity: bool = True,
 ) -> SyncResult:
     today = today or today_sp()
     date_from = today - timedelta(days=SYNC_DAYS)
@@ -96,6 +127,8 @@ def sync_profile(
                     )
                 if account.kind == "credit_card":
                     _sync_bills(store, provider, account, result)
+            if identity:
+                _learn_identity(store, provider, profile, item_id, result)
             store.mark_item_synced(item_id)
             store.conn.commit()
             log.info("item %s synced", item_id)
@@ -116,6 +149,8 @@ def sync_profile(
     store.finish_run(
         run_id, status="ok", n_new=result.new, n_updated=result.updated, n_deleted=result.deleted
     )
+    # Pairs cross accounts and profiles, so the whole database is recomputed.
+    result.dedupe = run_dedupe(store.conn)
     if result.sign_mismatches:
         log.warning(
             "%d transactions where Pluggy type and amount sign disagree", result.sign_mismatches

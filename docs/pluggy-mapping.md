@@ -14,6 +14,7 @@ Fontes (consultadas em 15/11/2026):
 - **[PD]** Cobertura de Payment Data: https://docs.pluggy.ai/en/docs/open-finance/payment-data.md
 - **[CAT]** Categorização: https://docs.pluggy.ai/en/docs/products/transaction-categorization.md
 - **[RL]** Rate limits: https://docs.pluggy.ai/en/docs/reference/rate-limits.md
+- **[ID]** Identity: https://docs.pluggy.ai/en/docs/products/identity.md, `GET /identity?itemId=` (operationId `identity-find-by-item`) e schema `IdentityResponse` na [OAS]; cobertura em https://docs.pluggy.ai/en/docs/connections/connectors-coverage.md e https://docs.pluggy.ai/en/docs/connections/identity-coverage.md (consultados em 15/11/2026)
 - **[BILL]** Credit Card Bills: https://docs.pluggy.ai/en/docs/products/credit-card-bills.md (consultado em 15/11/2026; schemas `Bill`, `BillPayment` e `BillFinanceCharge` e o endpoint `GET /bills` na [OAS])
 - **[REAL]** Formato observado numa resposta real de `GET /bills` (só as chaves e o formato das datas/valores; nenhum valor real foi guardado no repositório)
 - **[BP]** Fonte secundária, MIT: brunopedrazza/pluggy-mcp-server, `DESIGN.md`. São medições em 3 itens MeuPluggy reais.
@@ -28,6 +29,7 @@ Fontes (consultadas em 15/11/2026):
 | `GET /accounts?itemId=` | Contas do item. A resposta tem `{page, total, totalPages, results}` e o endpoint não documenta parâmetro de página. | [OAS] |
 | `GET /v2/transactions?accountId=&dateFrom=` | Transações. Paginação por cursor, até 500 por página. | [BC], [TX] |
 | `GET /bills?accountId=&pageSize=500&page=N` | Faturas **fechadas** do cartão. Paginação por página (`page`, `totalPages`); `pageSize` máximo 500. Só chamado para contas `credit_card`. | [OAS], [BILL] |
+| `GET /identity?itemId=` | Documento do titular do item (`document`, `documentType`). Só o hash é gravado. Uma vez por item; `404 IDENTITY_NOT_FOUND` = sem identidade. | [OAS], [ID] |
 
 - **v1 `/transactions`:** está deprecated e só funciona até 31/12/2026. Aplicações criadas a partir de 02/06/2026 já recebem `410 Gone` (`ENDPOINT_DEPRECATED`) [BC]. A [BP] mediu o 410 em itens MeuPluggy. Por isso usamos só a `/v2`.
 - **Cursor:** a resposta traz `next`, uma *query string* pronta (`?accountId=…&after=…`) ou `null`. Ela é anexada ao path sem alterações, e o `after` nunca deve ser montado à mão [BC]. O cliente recusa um `next` que aponte para outro host e para se o cursor se repetir.
@@ -77,7 +79,7 @@ O JSON é lido com `parse_float=Decimal`, então o valor nunca passa por `float`
 | Conta corrente | `operationType` | Algo como `BOLETO`, `CARTAO` ou `OUTROS` | **NÃO VERIFICADO.** Nenhuma fonte diz qual valor o débito do pagamento de fatura recebe na conta corrente. |
 | Ambos | `creditCardMetadata.billId` + valor da fatura (`GET /bills`) | Casar o débito na conta com o total da fatura | `billId` só vem em Open Finance [TX]. A [CB] casa o valor do débito com `bills.totalAmount`. Fica para a Fase 3. O `/bills` é sincronizado desde a Fase 2 (ver "Faturas de cartão"). |
 
-Para a Fase 3: considerar pagamento de fatura o débito em conta corrente com `category == "Credit card payment"`, ou um par débito-na-conta / crédito-no-cartão com o mesmo valor e até ~3 dias de diferença. Validar com Nubank e Itaú reais (golden cases).
+Fase 3 (implementado, ver "Limpeza (dedupe)" abaixo): débito em conta com `category == "Credit card payment"`, `operationType == PAGAMENTO_FATURA` ou descrição de pagamento de fatura só sai do gasto se o cartão pago parecer sincronizado (crédito de pagamento no cartão ou pagamento de fatura fechada com o mesmo valor ±1 centavo e até 3 dias, ou um cartão no mesmo item). O caso Itaú dos testes é sintético; validar com dados reais.
 
 ### Contraparte de Pix/TED (CPF/CNPJ)
 
@@ -150,3 +152,29 @@ Quando a fatura fecha, a Pluggy pode **apagar uma transação de cartão e criá
 - Se `consentExpiresAt` já passou, nada é apagado.
 
 Reconectar um banco cria um **item novo, com ids novos** [TX], [MP]. Para deduplicar entre itens, `providerId` é o id estável (só Open Finance) [CYC]. Isso fica para a Fase 3.
+
+
+## Identidade do titular (`GET /identity`) — Fase 3
+
+- **Endpoint:** `GET /identity?itemId=<uuid>` → `IdentityResponse`. Respostas documentadas: `200`, `400` (itemId inválido), `404` (`IDENTITY_NOT_FOUND`) e `500` [OAS].
+- **Campos lidos:** só `document` ("Primary document that identifies the owner"; no exemplo vem formatado `123.456.789-00` e, no exemplo Open Finance, só dígitos) e `documentType` (`CPF`/`CNPJ`) [OAS], [ID]. O modelo pydantic do cliente declara só esses dois campos; nome, endereços, telefones, e-mails, `relations` etc. são ignorados na leitura e **nunca** gravados nem logados.
+- **Gravação:** `document` → dígitos (11 ou 14; mascarado é descartado) → `SHA-256(sal + dígitos)` em `item_identities.doc_hash` e em `household_docs` (`source='identity'`). Se todas as contas do item tiverem o mesmo dono, o hash é ligado a essa pessoa.
+- **Cobertura:** a tabela de conectores marca **Identity 🟢 para o MeuPluggy** [ID]. A página de cobertura por campo **não lista o MeuPluggy**, então **NÃO VERIFICADO** se `document` vem preenchido. Por isso o uso é "melhor esforço": `404` é silencioso, outros erros (exceto `401`) só geram aviso, e `grana-mcp sync --no-identity` desliga a chamada.
+- **Frequência:** só é chamado para itens que ainda não têm documento aprendido.
+
+## Limpeza (dedupe) — Fase 3
+
+Implementada em `pipeline/dedupe.py`; roda no fim de todo `sync` e no `grana-mcp reprocess`. Usa estes campos já gravados:
+
+| Uso | Campo | Valores | Fonte |
+|---|---|---|---|
+| Pagamento de fatura (cartão) | `operationType` | `PAGAMENTO_FATURA` (inclusive o "Pagamento recebido" criado pela Pluggy) | [TX], [OAS] |
+| Pagamento de fatura (conta) | `category` / descrição | `Credit card payment` (subcategoria de *Transfers*) ou descrição tipo "Pagamento de fatura", "PAGTO FATURA" | [CAT]; descrição observada em dados reais (Nubank) |
+| Estorno | `operationType` | `ESTORNO` (cartão) | [TX] |
+| Transferência | `operationType` | `PIX`, `TED`, `DOC`, `TRANSFERENCIA_MESMA_INSTITUICAO` (conta) | [TX] |
+| Transferência | `category` | árvore *Transfers*, *Same person transfer*, *Third-party transfers* | [CAT] |
+| Investimento | `operationType` | `RESGATE_APLIC_FINANCEIRA`. **Não existe** `APLICACAO_*` no enum documentado da conta (`TED DOC PIX TRANSFERENCIA_MESMA_INSTITUICAO BOLETO CONVENIO_ARRECADACAO PACOTE_TARIFA_SERVICOS TARIFA_SERVICOS_AVULSOS FOLHA_PAGAMENTO DEPOSITO SAQUE CARTAO ENCARGOS_JUROS_CHEQUE_ESPECIAL RENDIMENTO_APLIC_FINANCEIRA PORTABILIDADE_SALARIO RESGATE_APLIC_FINANCEIRA OPERACAO_CREDITO OUTROS`). Nos dados reais do Nubank, a *aplicação* RDB também vem como `RESGATE_APLIC_FINANCEIRA`. `RENDIMENTO_APLIC_FINANCEIRA` é rendimento (crédito) e não é marcado. | [TX] |
+| Investimento | `category` | `Investments` e as filhas `Automatic investment`, `Fixed income`, `Mutual funds`, `Variable income`, `Pension` (ficam de fora `Margin` e `Proceeds interests and dividends`) | [CAT] |
+| Transferência interna | `paymentData` → `counterpart_doc_hash` | hash comparado com `household_docs` | [OAS], [PD] |
+
+Colunas novas (migração v3): `transactions.excluded_pair_id` (a outra ponta do par), `transactions.review_flag` (`unmatched_bill_payment` | `unmatched_refund`), `accounts.owner_person_id`, tabelas `people` e `item_identities`; `household_docs` passou a ter `person_id`, `source` e `created_at`; `excluded_reason` aceita `investment`.

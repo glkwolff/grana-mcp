@@ -4,6 +4,10 @@ Spending = rows with ``amount_cents < 0`` and ``excluded_reason IS NULL``, dated
 inside the period and not after ``today`` (future-dated rows are scheduled card
 installments, reported only by ``card_bills``). Amounts returned here are
 positive cents of spending.
+
+Person of a row = owner of its account (``accounts.owner_person_id``); when the
+account has no owner, the row's profile stands for the person (one person per
+profile, the pre-v3 behavior).
 """
 
 from __future__ import annotations
@@ -19,7 +23,7 @@ from grana_mcp.analytics.card_bill import CardTx, ClosedBill
 from grana_mcp.analytics.periods import Period
 from grana_mcp.privacy.redact import PERSON_LABEL, looks_like_person_transfer, sanitize_text
 
-GroupBy = Literal["category", "merchant", "profile", "account"]
+GroupBy = Literal["category", "merchant", "profile", "account", "person"]
 FALLBACK_CATEGORY = "Outros"
 UNKNOWN_MERCHANT = "(sem descrição)"
 
@@ -83,11 +87,55 @@ def account_label(name: str | None, number_masked: str | None) -> str:
     return sanitize_text(label) or "(conta)"
 
 
+# --- people ---
+
+# Every spending/listing query reads FROM this, so person/profile/account are
+# always available as pe.*, p.*, a.*.
+TX_FROM = (
+    "transactions t LEFT JOIN accounts a ON a.id = t.account_id "
+    "LEFT JOIN people pe ON pe.id = a.owner_person_id "
+    "LEFT JOIN profiles p ON p.id = t.profile_id"
+)
+PERSON_SQL = "COALESCE(pe.display_name, p.display_name, t.profile_id)"
+
+
+@dataclass(frozen=True, slots=True)
+class Filters:
+    """Optional filters shared by the tools: profile ids and people (id or name)."""
+
+    profiles: Sequence[str] | None = None
+    people: Sequence[str] | None = None
+
+    def sql(self) -> tuple[str, list[object]]:
+        sql = ""
+        params: list[object] = []
+        if self.profiles:
+            sql += f" AND t.profile_id IN ({', '.join('?' * len(self.profiles))})"
+            params.extend(self.profiles)
+        if self.people:
+            keys = [x.strip().lower() for x in self.people]
+            marks = ", ".join("?" * len(keys))
+            sql += (
+                f" AND (lower({PERSON_SQL}) IN ({marks}) "
+                f"OR lower(COALESCE(pe.id, t.profile_id)) IN ({marks}))"
+            )
+            params.extend(keys)
+            params.extend(keys)
+        return sql, params
+
+
+def as_filters(f: Filters | Sequence[str] | None) -> Filters:
+    """Accept the Phase 2 ``profiles`` list as well as ``Filters``."""
+    if isinstance(f, Filters):
+        return f
+    return Filters(profiles=f)
+
+
 # --- spending ---
 
 
 def _spending_where(
-    period: Period, today: date, profiles: Sequence[str] | None
+    period: Period, today: date, filters: Filters | Sequence[str] | None
 ) -> tuple[str, list[object]]:
     end = min(period.end, today)
     sql = (
@@ -95,10 +143,8 @@ def _spending_where(
         "AND t.posted_date >= ? AND t.posted_date <= ?"
     )
     params: list[object] = [period.start.isoformat(), end.isoformat()]
-    if profiles:
-        sql += f" AND t.profile_id IN ({', '.join('?' * len(profiles))})"
-        params.extend(profiles)
-    return sql, params
+    extra, extra_params = as_filters(filters).sql()
+    return sql + extra, params + extra_params
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,11 +155,14 @@ class Bucket:
 
 
 def spending_total(
-    conn: sqlite3.Connection, period: Period, today: date, profiles: Sequence[str] | None = None
+    conn: sqlite3.Connection,
+    period: Period,
+    today: date,
+    profiles: Filters | Sequence[str] | None = None,
 ) -> Bucket:
     where, params = _spending_where(period, today, profiles)
     row = conn.execute(
-        f"SELECT COALESCE(-SUM(t.amount_cents), 0), COUNT(*) FROM transactions t WHERE {where}",  # noqa: S608
+        f"SELECT COALESCE(-SUM(t.amount_cents), 0), COUNT(*) FROM {TX_FROM} WHERE {where}",  # noqa: S608
         params,
     ).fetchone()
     return Bucket("total", int(row[0]), int(row[1]))
@@ -124,25 +173,25 @@ def spending_by(
     period: Period,
     today: date,
     group_by: GroupBy,
-    profiles: Sequence[str] | None = None,
+    profiles: Filters | Sequence[str] | None = None,
 ) -> list[Bucket]:
     """All buckets, largest spending first (callers cap and fold the tail)."""
     where, params = _spending_where(period, today, profiles)
     if group_by == "merchant":
         return _spending_by_merchant(conn, where, params)
     if group_by == "category":
-        key_sql, join = category_sql(), ""
+        key_sql = category_sql()
     elif group_by == "profile":
         key_sql = "COALESCE(p.display_name, t.profile_id)"
-        join = "LEFT JOIN profiles p ON p.id = t.profile_id"
+    elif group_by == "person":
+        key_sql = PERSON_SQL
     elif group_by == "account":
-        key_sql = "a.id"
-        join = "LEFT JOIN accounts a ON a.id = t.account_id"
+        key_sql = "t.account_id"
     else:
         raise ValueError(f"unknown group_by: {group_by}")
     rows = conn.execute(
         f"SELECT {key_sql} AS k, -SUM(t.amount_cents) AS cents, COUNT(*) AS n "  # noqa: S608
-        f"FROM transactions t {join} WHERE {where} GROUP BY k",
+        f"FROM {TX_FROM} WHERE {where} GROUP BY k",
         params,
     ).fetchall()
     if group_by == "account":
@@ -164,7 +213,7 @@ def _spending_by_merchant(
     for row in conn.execute(
         "SELECT t.amount_cents, t.merchant, t.description_clean, t.description_raw, "  # noqa: S608
         "t.counterpart_doc_hash, t.counterpart_doc_type, t.operation_type "
-        f"FROM transactions t WHERE {where}",
+        f"FROM {TX_FROM} WHERE {where}",
         params,
     ):
         acc = totals.setdefault(merchant_label(row, household), [0, 0])
@@ -174,21 +223,78 @@ def _spending_by_merchant(
     return sorted(buckets, key=lambda b: (-b.cents, b.key))
 
 
-def possible_double_count(
-    conn: sqlite3.Connection, period: Period, today: date, profiles: Sequence[str] | None = None
+def flagged_total(
+    conn: sqlite3.Connection,
+    period: Period,
+    today: date,
+    flag: str,
+    filters: Filters | Sequence[str] | None = None,
 ) -> Bucket:
-    """Spending rows Pluggy tagged as card bill payments or same-person transfers.
+    """Rows the dedupe left in place but flagged for review (``review_flag``).
 
-    Until the Phase 3 dedupe marks them ``excluded_reason``, they are counted.
+    Amount is the absolute value (unmatched bill payments are debits that still
+    count as spending; unmatched refunds are credits).
     """
-    where, params = _spending_where(period, today, profiles)
+    extra, extra_params = as_filters(filters).sql()
     row = conn.execute(
-        f"SELECT COALESCE(-SUM(t.amount_cents), 0), COUNT(*) FROM transactions t WHERE {where} "  # noqa: S608
-        "AND (lower(t.provider_category) IN ('credit card payment', 'same person transfer') "
-        "OR t.operation_type = 'PAGAMENTO_FATURA')",
-        params,
+        f"SELECT COALESCE(SUM(abs(t.amount_cents)), 0), COUNT(*) FROM {TX_FROM} "  # noqa: S608
+        "WHERE t.review_flag = ? AND t.excluded_reason IS NULL "
+        f"AND t.posted_date >= ? AND t.posted_date <= ?{extra}",
+        [flag, period.start.isoformat(), min(period.end, today).isoformat(), *extra_params],
     ).fetchone()
-    return Bucket("possible_double_count", int(row[0]), int(row[1]))
+    return Bucket(flag, int(row[0]), int(row[1]))
+
+
+# --- excluded rows ---
+
+
+@dataclass(frozen=True, slots=True)
+class ExcludedTotal:
+    reason: str
+    out_cents: int  # positive: sum of the excluded debits
+    in_cents: int  # positive: sum of the excluded credits
+    count: int
+
+
+def _excluded_where(
+    period: Period, reason: str | None, filters: Filters
+) -> tuple[str, list[object]]:
+    sql = "t.excluded_reason IS NOT NULL AND t.posted_date >= ? AND t.posted_date <= ?"
+    params: list[object] = [period.start.isoformat(), period.end.isoformat()]
+    if reason:
+        sql += " AND t.excluded_reason = ?"
+        params.append(reason)
+    extra, extra_params = filters.sql()
+    return sql + extra, params + extra_params
+
+
+def excluded_totals(
+    conn: sqlite3.Connection, period: Period, reason: str | None, filters: Filters
+) -> list[ExcludedTotal]:
+    where, params = _excluded_where(period, reason, filters)
+    return [
+        ExcludedTotal(r[0], int(r[1]), int(r[2]), int(r[3]))
+        for r in conn.execute(
+            "SELECT t.excluded_reason, "  # noqa: S608
+            "COALESCE(-SUM(CASE WHEN t.amount_cents < 0 THEN t.amount_cents END), 0), "
+            "COALESCE(SUM(CASE WHEN t.amount_cents > 0 THEN t.amount_cents END), 0), COUNT(*) "
+            f"FROM {TX_FROM} WHERE {where} GROUP BY t.excluded_reason ORDER BY t.excluded_reason",
+            params,
+        )
+    ]
+
+
+def excluded_rows(
+    conn: sqlite3.Connection, period: Period, reason: str | None, filters: Filters, limit: int
+) -> list[sqlite3.Row]:
+    """Newest first, at most ``limit``."""
+    where, params = _excluded_where(period, reason, filters)
+    return conn.execute(
+        f"SELECT t.*, a.name AS account_name, a.number_masked AS account_number, "  # noqa: S608
+        f"{PERSON_SQL} AS person FROM {TX_FROM} WHERE {where} "
+        "ORDER BY t.posted_date DESC, t.id LIMIT ?",
+        [*params, limit],
+    ).fetchall()
 
 
 # --- individual rows ---
@@ -204,7 +310,7 @@ def find_rows(
     *,
     query: str | None,
     category: str | None,
-    profiles: Sequence[str] | None,
+    profiles: Filters | Sequence[str] | None,
     limit: int,
 ) -> tuple[list[sqlite3.Row], int]:
     """Matching rows (newest first, at most ``limit``) and the total match count.
@@ -223,17 +329,16 @@ def find_rows(
     if category:
         sql += f" AND lower({category_sql()}) = ?"
         params.append(category.strip().lower())
-    if profiles:
-        sql += f" AND t.profile_id IN ({', '.join('?' * len(profiles))})"
-        params.extend(profiles)
+    extra, extra_params = as_filters(profiles).sql()
+    sql += extra
+    params.extend(extra_params)
     total = int(
-        conn.execute(f"SELECT COUNT(*) FROM transactions t WHERE {sql}", params).fetchone()[0]  # noqa: S608
+        conn.execute(f"SELECT COUNT(*) FROM {TX_FROM} WHERE {sql}", params).fetchone()[0]  # noqa: S608
     )
     rows = conn.execute(
         f"SELECT t.*, {category_sql()} AS cat, a.name AS account_name, "  # noqa: S608
-        "a.number_masked AS account_number, COALESCE(p.display_name, t.profile_id) AS profile "
-        "FROM transactions t LEFT JOIN accounts a ON a.id = t.account_id "
-        "LEFT JOIN profiles p ON p.id = t.profile_id "
+        "a.number_masked AS account_number, COALESCE(p.display_name, t.profile_id) AS profile, "
+        f"{PERSON_SQL} AS person FROM {TX_FROM} "
         f"WHERE {sql} ORDER BY t.posted_date DESC, t.id LIMIT ?",
         [*params, limit],
     ).fetchall()
@@ -268,10 +373,11 @@ def card_transactions(conn: sqlite3.Connection, account_id: str) -> list[CardTx]
             amount_cents=r["amount_cents"],
             operation_type=r["operation_type"],
             provider_category=r["provider_category"],
+            excluded_reason=r["excluded_reason"],
         )
         for r in conn.execute(
-            "SELECT id, posted_date, amount_cents, operation_type, provider_category "
-            "FROM transactions WHERE account_id = ?",
+            "SELECT id, posted_date, amount_cents, operation_type, provider_category, "
+            "excluded_reason FROM transactions WHERE account_id = ?",
             (account_id,),
         )
     ]

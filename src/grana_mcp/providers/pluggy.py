@@ -7,6 +7,7 @@ Only these HTTP calls exist in this module, on purpose:
 * ``GET  /accounts?itemId=``  accounts of an item
 * ``GET  /v2/transactions``   transactions of an account, cursor pagination
 * ``GET  /bills?accountId=``  closed credit card bills of an account, page pagination
+* ``GET  /identity?itemId=``  holder document of an item (only ``document`` is read)
 
 There is no code for payments, Pix, transfers, connect tokens, item
 update/refresh/delete or anything else that writes. See CLAUDE.md, rule 1.
@@ -138,6 +139,13 @@ class _RawTransaction(_Raw):
     paymentData: _RawPaymentData | None = None
     creditCardMetadata: _RawCreditCardMetadata | None = None
     merchant: _RawMerchant | None = None
+
+
+class _RawIdentity(_Raw):
+    # Only the holder document is declared; name, addresses, phones etc. in the
+    # payload are ignored by pydantic and never stored.
+    document: str | None = None
+    documentType: str | None = None
 
 
 class _RawBillPayment(_Raw):
@@ -495,6 +503,21 @@ class PluggyClient:
                 raise PluggyError("Pluggy repeated a pagination cursor; stopping")
             seen.add(url)
         log.info("account %s: %d transactions in %d pages", account.id, total, pages)
+
+    def get_identity_document(self, item_id: str) -> str | None:
+        """``GET /identity?itemId=``: digits of the holder's CPF/CNPJ, or None when
+        Pluggy has no identity for the item (404 ``IDENTITY_NOT_FOUND``) or the
+        document is missing/masked. Other errors raise ``PluggyError``."""
+        try:
+            body = self._get("/identity", params={"itemId": item_id})
+        except PluggyError as exc:
+            if exc.status == 404:
+                return None
+            raise
+        if not isinstance(body, dict):
+            return None
+        raw = _RawIdentity.model_validate(body)
+        return document_digits(raw.document)
 
     def list_bills(self, account: Account) -> list[Bill]:
         """Closed bills of a credit card account (``GET /bills``, page pagination).

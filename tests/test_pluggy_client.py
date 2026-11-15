@@ -17,7 +17,7 @@ from grana_mcp.providers.pluggy import (
     PluggyClient,
     PluggyError,
 )
-from tests.fakes import CARD_ID, CHECKING_ID, CURSOR_1, ITEM_ID, FakePluggy
+from tests.fakes import CARD_ID, CHECKING_ID, CURSOR_1, ITEM_ID, FakePluggy, load
 
 FROM = date(2025, 11, 15)
 CHECKING = Account(CHECKING_ID, ITEM_ID, "checking", "c", None, "BRL")
@@ -167,10 +167,18 @@ def test_client_exposes_no_write_methods() -> None:
         "list_accounts",
         "list_transactions",
         "list_bills",
+        "get_identity_document",
     }
 
 
-ALLOWED_PATH_PREFIXES = ("/auth", "/items/", "/accounts", "/v2/transactions", "/bills")
+ALLOWED_PATH_PREFIXES = (
+    "/auth",
+    "/items/",
+    "/accounts",
+    "/v2/transactions",
+    "/bills",
+    "/identity",
+)
 
 
 def test_module_mentions_only_read_endpoints() -> None:
@@ -185,3 +193,23 @@ def test_module_mentions_only_read_endpoints() -> None:
                 pytest.fail(f"unexpected endpoint literal {value!r}")
     for forbidden in ("connect_token", "/payments", "/pix", "smart-transfer", "/mfa"):
         assert forbidden not in source.lower()
+
+
+def test_identity_document_only() -> None:
+    fake = FakePluggy(identity=load("identity.json"))
+    with fake.client() as c:
+        assert c.get_identity_document(ITEM_ID) == "0" * 11
+    req = next(r for r in fake.requests if r.url.path == "/identity")
+    assert req.method == "GET" and req.url.params["itemId"] == ITEM_ID
+
+
+def test_identity_not_found_masked_or_error() -> None:
+    with FakePluggy().client() as c:
+        assert c.get_identity_document(ITEM_ID) is None  # documented 404
+    masked = load("identity.json") | {"document": "***.000.000-**"}
+    with FakePluggy(identity=masked).client() as c:
+        assert c.get_identity_document(ITEM_ID) is None
+    failing = FakePluggy(identity=load("identity.json"), identity_status=500)
+    with failing.client() as c, pytest.raises(PluggyError) as exc:
+        c.get_identity_document(ITEM_ID)
+    assert exc.value.status == 500

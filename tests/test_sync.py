@@ -9,7 +9,7 @@ from grana_mcp import config
 from grana_mcp.config import Profile
 from grana_mcp.store import db
 from grana_mcp.sync import sync_profile
-from tests.fakes import CARD_ID, ITEM_ID, FakePluggy
+from tests.fakes import CARD_ID, ITEM_ID, FakePluggy, load
 
 TODAY = date(2026, 11, 15)
 PROFILE = Profile(id="ana", display_name="Ana", item_ids=[ITEM_ID])
@@ -120,3 +120,53 @@ def test_failed_sync_is_recorded(store: db.Store) -> None:
     run = store.conn.execute("SELECT status, error FROM sync_runs").fetchone()
     assert run["status"] == "error"
     assert "ITEM_NOT_FOUND" in run["error"]
+
+
+def test_sync_runs_dedupe(store: db.Store) -> None:
+    fake = FakePluggy()
+    with fake.client() as c:
+        r = sync_profile(store, c, PROFILE, today=TODAY)
+    assert r.dedupe is not None
+    # Fixture: checking "PAGAMENTO FATURA" + card "Pagamento recebido", same amount/day.
+    assert r.dedupe.by_reason["card_bill_payment"] == 2
+    assert r.dedupe.flags["unmatched_refund"] == 1  # partial card refund
+    rows = dict(
+        store.conn.execute(
+            "SELECT description_raw, excluded_reason FROM transactions "
+            "WHERE excluded_reason IS NOT NULL"
+        ).fetchall()
+    )
+    assert set(rows.values()) == {"card_bill_payment"}
+
+
+def test_sync_learns_identity_as_hash_only(store: db.Store) -> None:
+    fake = FakePluggy(identity=load("identity.json"))
+    with fake.client() as c:
+        r = sync_profile(store, c, PROFILE, today=TODAY)
+        assert r.identities_learned == 1
+        r2 = sync_profile(store, c, PROFILE, today=TODAY)
+    assert r2.identities_learned == 0
+    assert sum(1 for x in fake.requests if x.url.path == "/identity") == 1  # once per item
+    salt = db.load_or_create_salt(config.data_dir())
+    row = store.conn.execute("SELECT doc_hash, source, profile_id FROM household_docs").fetchone()
+    assert tuple(row) == (db.hash_doc("0" * 11, salt), "identity", "ana")
+    assert store.conn.execute("SELECT item_id FROM item_identities").fetchone()[0] == ITEM_ID
+    store.conn.close()
+    raw = config.db_path().read_bytes()
+    for plain in (b"Titular", b"Rua Sintetica", b"example.invalid", b"Conjuge", b"1990-01-01"):
+        assert plain not in raw
+
+
+def test_sync_identity_optional(store: db.Store) -> None:
+    fake = FakePluggy(identity=load("identity.json"), identity_status=403)
+    with fake.client() as c:
+        r = sync_profile(store, c, PROFILE, today=TODAY)
+    assert any("identity unavailable (403)" in w for w in r.warnings)
+    fake = FakePluggy(identity=load("identity.json"))
+    with fake.client() as c:
+        r = sync_profile(store, c, PROFILE, today=TODAY, identity=False)
+    assert r.identities_learned == 0
+    assert not any(x.url.path == "/identity" for x in fake.requests)
+    fake = FakePluggy(identity=load("identity.json"), identity_status=401)
+    with fake.client() as c, pytest.raises(Exception, match="401"):
+        sync_profile(store, c, PROFILE, today=TODAY)

@@ -3,7 +3,8 @@
 Response shapes follow the documented API (OpenAPI at docs.pluggy.ai):
 ``POST /auth``, ``GET /items/{id}``, ``GET /accounts?itemId=``,
 ``GET /v2/transactions?accountId=`` with ``next`` cursor query strings,
-``GET /bills?accountId=`` with ``page``/``totalPages``.
+``GET /bills?accountId=`` with ``page``/``totalPages``, ``GET /identity?itemId=``
+(404 ``IDENTITY_NOT_FOUND`` unless ``identity`` is set).
 """
 
 from __future__ import annotations
@@ -50,6 +51,9 @@ class FakePluggy:
         default_factory=lambda: {CARD_ID: [load("bills_card.json")]}
     )
     bills_status: int = 200
+    # GET /identity body (None -> documented 404 IDENTITY_NOT_FOUND)
+    identity: dict[str, Any] | None = None
+    identity_status: int = 200
     requests: list[httpx.Request] = field(default_factory=list)
     issued_keys: list[str] = field(default_factory=list)
     expired_keys: set[str] = field(default_factory=set)
@@ -105,6 +109,21 @@ class FakePluggy:
             return httpx.Response(
                 200, content=json.dumps(page).encode(), headers={"content-type": "application/json"}
             )
+        if path == "/identity":
+            if self.identity_status != 200:
+                return httpx.Response(
+                    self.identity_status, json={"code": self.identity_status, "message": "x"}
+                )
+            if self.identity is None or request.url.params.get("itemId") != self.item["id"]:
+                return httpx.Response(
+                    404,
+                    json={
+                        "code": 404,
+                        "codeDescription": "IDENTITY_NOT_FOUND",
+                        "message": "identity not found",
+                    },
+                )
+            return httpx.Response(200, json=self.identity)
         if path == "/bills":
             if self.bills_status != 200:
                 return httpx.Response(

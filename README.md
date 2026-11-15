@@ -29,7 +29,21 @@ claude mcp add grana -- uv --directory /caminho/para/grana-mcp run grana-mcp ser
 
 Use `--scope user` para valer em todos os projetos. O servidor só lê o SQLite local e não acessa a rede; o `sync` continua sendo pela linha de comando (dá para agendar no cron).
 
-Ferramentas: `status`, `spending_summary`, `compare_periods`, `top_merchants`, `find_transactions` (no máximo 50 linhas, com nomes de pessoas físicas mascarados) e `card_bills` (faturas fechadas e estimativa da fatura aberta). Prompt: `relatorio_mensal`.
+Ferramentas: `status` (conexões, pessoas e dono de cada conta), `spending_summary` (por categoria, estabelecimento, pessoa, perfil ou conta), `compare_periods`, `top_merchants`, `find_transactions` (no máximo 50 linhas, com nomes de pessoas físicas mascarados), `excluded_items` (o que ficou fora do gasto e por quê) e `card_bills` (faturas fechadas e estimativa da fatura aberta). Prompt: `relatorio_mensal`.
+
+### Casal ou família
+
+Uma credencial pode trazer contas de mais de uma pessoa. Diga quem é dono de cada conta e quais CPFs são da casa (só o hash com sal local é guardado):
+
+```bash
+grana-mcp person add "Ana"
+grana-mcp account list
+grana-mcp account assign 0001 ana        # id da conta ou final do número
+grana-mcp household add-doc ana          # pede o CPF/CNPJ sem mostrar na tela
+grana-mcp reprocess                      # recalcula a limpeza, sem rede
+```
+
+A cada `sync` (e no `reprocess`), a limpeza tira do gasto: pagamento de fatura de cartão sincronizado, transferências entre contas/pessoas da casa, aplicações e resgates de investimento e pares compra/estorno. Sem pessoas cadastradas, cada perfil conta como uma pessoa. O `sync` também lê o CPF/CNPJ do titular de cada conexão (`GET /identity`) e guarda só o hash; use `--no-identity` para desligar.
 
 ## Software, não serviço
 

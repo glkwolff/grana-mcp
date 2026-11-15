@@ -67,7 +67,8 @@ def test_sync_then_status(fake: FakePluggy) -> None:
     assert status.exit_code == 0, out
     assert "autorização expira em 2027-01-10" in out
     assert "Conta Corrente Sintetica ****00-0 [checking]" in out
-    assert "2026-10  Conta Corrente Sintetica [checking]: R$ 1.384,81 (2 transações)" in out
+    # The R$ 1.234,56 bill payment is excluded: the paid card is synced (same item).
+    assert "2026-10  Conta Corrente Sintetica [checking]: R$ 150,25 (1 transações)" in out
     assert "2026-09  Conta Corrente Sintetica [checking]: R$ 10,10 (1 transações)" in out
     assert "2026-10  Cartao Sintetico [credit_card]: R$ 145,27 (2 transações)" in out
     for text in (first.output, second.output, out):
@@ -124,3 +125,83 @@ def test_consent_line_without_date() -> None:
         "autorização: sem data de expiração",
         False,
     )
+
+
+# --- people, ownership, household documents, reprocess ---
+
+
+def _synced(fake: FakePluggy) -> None:
+    _add_profile()
+    result = runner.invoke(cli.app, ["sync"])
+    assert result.exit_code == 0, result.output
+    assert "limpeza: 2 pagamento(s) de fatura" in result.output
+
+
+def test_person_and_account_commands(fake: FakePluggy) -> None:
+    _synced(fake)
+    assert "cada perfil conta como uma pessoa" in runner.invoke(cli.app, ["person", "list"]).output
+    out = runner.invoke(cli.app, ["person", "add", "Bia Sintética"])
+    assert out.exit_code == 0 and "bia-sintetica" in out.output
+    dup = runner.invoke(cli.app, ["person", "add", "Bia Sintética"])
+    assert dup.exit_code == 1 and "já existe" in dup.output
+
+    listed = runner.invoke(cli.app, ["account", "list"]).output
+    assert "sem dono" in listed and "****00-0" in listed
+
+    ok = runner.invoke(cli.app, ["account", "assign", "00-0", "bia sintética"])
+    assert ok.exit_code == 0, ok.output
+    assert "-> bia-sintetica" in ok.output and "limpeza:" in ok.output
+    amb = runner.invoke(cli.app, ["account", "assign", "0", "bia-sintetica"])
+    assert amb.exit_code == 1 and "mais de uma conta" in amb.output
+    missing = runner.invoke(cli.app, ["account", "assign", "zzzz", "bia-sintetica"])
+    assert missing.exit_code == 1 and "não encontrada" in missing.output
+    nobody = runner.invoke(cli.app, ["account", "assign", "00-0", "ninguem"])
+    assert nobody.exit_code == 1 and "não existe" in nobody.output
+
+    people = runner.invoke(cli.app, ["person", "list"]).output
+    assert "Bia Sintética: 1 conta(s), 0 documento(s)" in people
+    status = runner.invoke(cli.app, ["status"]).output
+    assert "Pessoas: Bia Sintética (bia-sintetica)" in status
+    assert "; Bia Sintética" in status
+
+
+def test_household_add_doc(fake: FakePluggy) -> None:
+    from tests.test_normalize_documents import SYNTH_CPF
+
+    _synced(fake)
+    runner.invoke(cli.app, ["person", "add", "Ana"])
+    ok = runner.invoke(cli.app, ["household", "add-doc", "ana"], input=f"{SYNTH_CPF}\n")
+    assert ok.exit_code == 0, ok.output
+    assert "CPF registrado para 'ana'" in ok.output
+    assert SYNTH_CPF not in ok.output
+    again = runner.invoke(cli.app, ["household", "add-doc", "ana"], input=f"{SYNTH_CPF}\n")
+    assert "já existia" in again.output
+    bad = runner.invoke(cli.app, ["household", "add-doc", "ana"], input="123\n")
+    assert bad.exit_code == 1 and "inválido" in bad.output
+    # No person with that name, but a profile: stored for the profile.
+    prof = runner.invoke(cli.app, ["household", "add-doc", "ana-sintetica"], input=f"{SYNTH_CPF}\n")
+    assert prof.exit_code == 0 and "'ana-sintetica'" in prof.output
+    unknown = runner.invoke(cli.app, ["household", "add-doc", "ninguem"], input=f"{SYNTH_CPF}\n")
+    assert unknown.exit_code == 1
+    raw = config.db_path().read_bytes()
+    assert SYNTH_CPF.encode() not in raw
+
+
+def test_reprocess_without_network(fake: FakePluggy) -> None:
+    _synced(fake)
+    n_requests = len(fake.requests)
+    out = runner.invoke(cli.app, ["reprocess"])
+    assert out.exit_code == 0, out.output
+    assert "0 alteração(ões)" in out.output
+    assert "1 estorno(s) sem compra correspondente" in out.output
+    assert len(fake.requests) == n_requests
+
+
+def test_sync_no_identity_flag(fake: FakePluggy) -> None:
+    _add_profile()
+    out = runner.invoke(cli.app, ["sync", "--no-identity"])
+    assert out.exit_code == 0, out.output
+    assert not any(r.url.path == "/identity" for r in fake.requests)
+    fake.identity = {"document": "0" * 11}
+    out = runner.invoke(cli.app, ["sync"])
+    assert "1 documento(s) de titular aprendido(s)" in out.output

@@ -19,12 +19,12 @@ from pathlib import Path
 from grana_mcp.config import ensure_private_dir
 from grana_mcp.providers.base import Account, Bill, Item, Transaction
 
-LATEST_VERSION = 2  # bump together with a new store/migrations/NNNN_*.sql
+LATEST_VERSION = 3  # bump together with a new store/migrations/NNNN_*.sql
 _MIGRATION_RE = re.compile(r"^(\d{4})_[a-z0-9_]+\.sql$")
 
 # Provider-owned transaction columns. Re-syncs overwrite only these; columns
-# owned by the local pipeline (description_clean, category, excluded_reason)
-# are never touched by a sync.
+# owned by the local pipeline (description_clean, category, excluded_reason,
+# excluded_pair_id, review_flag) are never touched by a sync.
 _TX_PROVIDER_COLUMNS = (
     "account_id",
     "profile_id",
@@ -140,7 +140,7 @@ class UpsertCounts:
 class Store:
     def __init__(self, conn: sqlite3.Connection, salt: bytes) -> None:
         self.conn = conn
-        self._salt = salt
+        self.salt = salt
 
     def upsert_profile(self, profile_id: str, display_name: str) -> None:
         self.conn.execute(
@@ -196,7 +196,7 @@ class Store:
                 tx.provider_category,
                 tx.installment_number,
                 tx.installment_total,
-                hash_doc(tx.counterpart_doc, self._salt) if tx.counterpart_doc else None,
+                hash_doc(tx.counterpart_doc, self.salt) if tx.counterpart_doc else None,
                 doc_type(tx.counterpart_doc),
                 tx.status,
                 tx.operation_type,
@@ -351,11 +351,9 @@ class Store:
         ).fetchall()
 
     def monthly_spending(self, since: date) -> list[sqlite3.Row]:
-        """Per month and account: sum of outflows (negative amounts), raw.
-
-        No dedupe yet (Phase 3): a card bill paid from a checking account shows up
-        both as card purchases and as the checking-account payment.
-        """
+        """Per month and account: sum of outflows (negative amounts), without the rows
+        the dedupe pipeline excluded (bill payments, internal transfers, investments,
+        refund pairs)."""
         return self.conn.execute(
             "SELECT substr(t.posted_date, 1, 7) AS month, a.id AS account_id, a.name, a.kind, "
             "SUM(t.amount_cents) AS spent_cents, COUNT(*) AS n "
@@ -364,3 +362,146 @@ class Store:
             "GROUP BY month, a.id ORDER BY month DESC, a.name",
             (since.isoformat(),),
         ).fetchall()
+
+
+# --- people, ownership and household documents (v3) ---
+
+
+class AmbiguousAccountError(LookupError):
+    """More than one account matches a reference."""
+
+
+_ALNUM_RE = re.compile(r"[^0-9a-z]")
+
+
+def _alnum(value: str | None) -> str:
+    return _ALNUM_RE.sub("", (value or "").lower())
+
+
+class People:
+    """People, account ownership and household documents. Never stores a plain document."""
+
+    def __init__(self, conn: sqlite3.Connection, salt: bytes) -> None:
+        self.conn = conn
+        self._salt = salt
+
+    def add(self, person_id: str, display_name: str) -> None:
+        """Raises ``sqlite3.IntegrityError`` when ``person_id`` already exists."""
+        self.conn.execute(
+            "INSERT INTO people (id, display_name, created_at) VALUES (?, ?, ?)",
+            (person_id, display_name, now_utc()),
+        )
+
+    def all(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT pe.id, pe.display_name, COUNT(a.id) AS n_accounts, "
+            "(SELECT COUNT(*) FROM household_docs h WHERE h.person_id = pe.id) AS n_docs "
+            "FROM people pe LEFT JOIN accounts a ON a.owner_person_id = pe.id "
+            "GROUP BY pe.id ORDER BY pe.display_name, pe.id"
+        ).fetchall()
+
+    def find(self, ref: str) -> sqlite3.Row | None:
+        """By id or display name (case-insensitive)."""
+        row: sqlite3.Row | None = self.conn.execute(
+            "SELECT * FROM people WHERE id = ? OR lower(display_name) = lower(?) "
+            "ORDER BY id = ? DESC LIMIT 1",
+            (ref.strip(), ref.strip(), ref.strip()),
+        ).fetchone()
+        return row
+
+    def accounts(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT a.id, a.item_id, a.kind, a.name, a.number_masked, a.owner_person_id, "
+            "pe.display_name AS owner_name, i.profile_id, pr.display_name AS profile_name "
+            "FROM accounts a LEFT JOIN people pe ON pe.id = a.owner_person_id "
+            "LEFT JOIN items i ON i.id = a.item_id LEFT JOIN profiles pr ON pr.id = i.profile_id "
+            "ORDER BY a.item_id, a.kind, a.name, a.id"
+        ).fetchall()
+
+    def find_account(self, ref: str) -> sqlite3.Row | None:
+        """By exact id, id prefix (>= 6 chars) or the end of the masked number.
+
+        Raises ``AmbiguousAccountError`` when several accounts match.
+        """
+        ref = ref.strip()
+        rows = self.accounts()
+        exact = [r for r in rows if r["id"] == ref]
+        if exact:
+            return exact[0]
+        # The masked number as typed (with punctuation) first, then digits/letters only.
+        typed = ref.lstrip("*")
+        matches = [r for r in rows if typed and (r["number_masked"] or "").endswith(typed)]
+        if len(matches) != 1:
+            suffix = _alnum(ref)
+            matches = [
+                r
+                for r in rows
+                if (len(ref) >= 6 and r["id"].startswith(ref))
+                or (suffix and _alnum(r["number_masked"]).endswith(suffix))
+            ]
+        if len(matches) > 1:
+            raise AmbiguousAccountError(ref)
+        return matches[0] if matches else None
+
+    def assign(self, account_id: str, person_id: str | None) -> None:
+        self.conn.execute(
+            "UPDATE accounts SET owner_person_id = ? WHERE id = ?", (person_id, account_id)
+        )
+        self._attach_identity_docs()
+
+    def add_doc(self, digits: str, *, person_id: str | None, profile_id: str | None = None) -> bool:
+        """Store the salted hash of a household CPF/CNPJ. Returns False if it existed
+        (its owner is updated)."""
+        doc_hash = hash_doc(digits, self._salt)
+        existed = (
+            self.conn.execute(
+                "SELECT 1 FROM household_docs WHERE doc_hash = ?", (doc_hash,)
+            ).fetchone()
+            is not None
+        )
+        self.conn.execute(
+            "INSERT INTO household_docs (doc_hash, person_id, profile_id, source, created_at) "
+            "VALUES (?, ?, ?, 'manual', ?) ON CONFLICT(doc_hash) DO UPDATE SET "
+            "person_id = excluded.person_id, profile_id = excluded.profile_id, "
+            "source = 'manual'",
+            (doc_hash, person_id, profile_id, now_utc()),
+        )
+        return not existed
+
+    def has_item_identity(self, item_id: str) -> bool:
+        return (
+            self.conn.execute(
+                "SELECT 1 FROM item_identities WHERE item_id = ?", (item_id,)
+            ).fetchone()
+            is not None
+        )
+
+    def set_item_identity(self, item_id: str, digits: str, profile_id: str) -> None:
+        """Record the item holder's document (hash only) and add it to the household."""
+        doc_hash = hash_doc(digits, self._salt)
+        self.conn.execute(
+            "INSERT INTO item_identities (item_id, doc_hash, fetched_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(item_id) DO UPDATE SET doc_hash = excluded.doc_hash, "
+            "fetched_at = excluded.fetched_at",
+            (item_id, doc_hash, now_utc()),
+        )
+        # Never overrides a manual entry.
+        self.conn.execute(
+            "INSERT OR IGNORE INTO household_docs (doc_hash, profile_id, source, created_at) "
+            "VALUES (?, ?, 'identity', ?)",
+            (doc_hash, profile_id, now_utc()),
+        )
+        self._attach_identity_docs()
+
+    def _attach_identity_docs(self) -> None:
+        """Identity docs without a person get the owner of their item's accounts,
+        when all of that item's accounts belong to the same person."""
+        self.conn.execute(
+            "UPDATE household_docs SET person_id = ("
+            "  SELECT MIN(a.owner_person_id) FROM item_identities ii "
+            "  JOIN accounts a ON a.item_id = ii.item_id "
+            "  WHERE ii.doc_hash = household_docs.doc_hash "
+            "  HAVING COUNT(*) = COUNT(a.owner_person_id) "
+            "     AND COUNT(DISTINCT a.owner_person_id) = 1"
+            ") WHERE source = 'identity' AND person_id IS NULL"
+        )

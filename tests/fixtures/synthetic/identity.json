@@ -1,0 +1,12 @@
+{
+  "id": "55555555-5555-4555-8555-000000000001",
+  "itemId": "11111111-1111-4111-8111-000000000001",
+  "fullName": "Pessoa Sintetica Titular",
+  "document": "000.000.000-00",
+  "documentType": "CPF",
+  "birthDate": "1990-01-01T00:00:00.000Z",
+  "addresses": [{"fullAddress": "Rua Sintetica 1, Cidade Sintetica", "type": "Personal"}],
+  "phoneNumbers": [{"type": "Personal", "value": "+55 00 00000-0000"}],
+  "emails": [{"type": "Personal", "value": "sintetico@example.invalid"}],
+  "relations": [{"type": "CONJUGE", "name": "Conjuge Sintetico", "document": "111.111.111-11"}]
+}

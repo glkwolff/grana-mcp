@@ -62,7 +62,7 @@ def conn() -> Iterator[sqlite3.Connection]:
         "INSERT INTO accounts (id, item_id, kind, name, number_masked) VALUES "
         "('chk', 'item-a', 'checking', 'Conta Sintetica', '****0001'),"
         "('card', 'item-b', 'credit_card', 'Cartao Sintetico', '****0002');"
-        "INSERT INTO household_docs VALUES ('hash-casa', 'bia');"
+        "INSERT INTO household_docs (doc_hash, profile_id) VALUES ('hash-casa', 'bia');"
     )
     yield c
     c.close()
@@ -99,7 +99,9 @@ def dumps(obj: Any) -> str:
 def test_status(conn: sqlite3.Connection) -> None:
     seed_october(conn)
     out = tools().status()
-    assert out["schema_version"] == 2
+    assert out["schema_version"] == 3
+    assert out["ownership"] == "profile" and out["people"] == []
+    assert {a["owner"] for a in out["accounts"]} == {"Ana", "Bia"}
     assert {i["id"] for i in out["items"]} == {"item-a", "item-b"}
     item_a = next(i for i in out["items"] if i["id"] == "item-a")
     assert 0 <= item_a["consent_days_left"] <= 30
@@ -188,12 +190,20 @@ def test_spending_summary_by_merchant_masks_people(conn: sqlite3.Connection) -> 
     assert "Fulano" not in dumps(out)
 
 
-def test_possible_double_count(conn: sqlite3.Connection) -> None:
-    add_tx(conn, "2026-10-07", -500_00, "PAGAMENTO FATURA", category="Credit card payment")
+def test_unmatched_bill_payment_caveat(conn: sqlite3.Connection) -> None:
+    tx = add_tx(conn, "2026-10-07", -500_00, "PAGAMENTO FATURA", category="Credit card payment")
+    conn.execute(
+        "UPDATE transactions SET review_flag = 'unmatched_bill_payment' WHERE id = ?", (tx,)
+    )
     conn.commit()
     out = tools().spending_summary("2026-10")
-    assert out["possible_double_count"]["amount"]["cents"] == 500_00
-    assert out["caveats"]
+    assert out["total"]["cents"] == 500_00  # still spending
+    assert out["review"]["unmatched_bill_payments"] == {
+        "amount": {"cents": 500_00, "brl": "R$ 500,00"},
+        "count": 1,
+    }
+    assert len(out["caveats"]) == 1 and "R$ 500,00" in out["caveats"][0]
+    assert "possible_double_count" not in out
 
 
 def test_bad_period_is_a_tool_error(conn: sqlite3.Connection) -> None:
@@ -350,11 +360,12 @@ def test_mcp_registration(conn: sqlite3.Connection) -> None:
         "top_merchants",
         "find_transactions",
         "card_bills",
+        "excluded_items",
     }
     assert not any("sync" in n for n in names)
     for t in listed:
         assert t.annotations is not None and t.annotations.read_only_hint is True
-    for name in ("spending_summary", "top_merchants", "find_transactions"):
+    for name in ("spending_summary", "top_merchants", "find_transactions", "excluded_items"):
         desc = next(t.description for t in listed if t.name == name) or ""
         assert "NÃO confiáveis" in desc
 
@@ -373,5 +384,116 @@ def test_mcp_registration(conn: sqlite3.Connection) -> None:
     with pytest.raises(ToolError, match="query"):
         asyncio.run(server.call_tool("find_transactions", {"period": "2026-10"}))
 
+    excluded = asyncio.run(
+        server.call_tool("excluded_items", {"period": "2026-10", "reason": "refund_pair"})
+    )
+    assert isinstance(excluded, CallToolResult) and not excluded.is_error
+
     prompts = asyncio.run(server.list_prompts())
     assert [p.name for p in prompts] == ["relatorio_mensal"]
+
+
+# --- people and excluded_items ---
+
+
+@pytest.fixture
+def household(conn: sqlite3.Connection) -> sqlite3.Connection:
+    """One profile (ana) holding accounts of two people (Ana and Bia)."""
+    conn.executescript(
+        "INSERT INTO people (id, display_name, created_at) VALUES "
+        "('ana-p', 'Ana Pessoa', 'x'), ('bia-p', 'Bia Pessoa', 'x');"
+        "INSERT INTO accounts (id, item_id, kind, name, number_masked, owner_person_id) VALUES "
+        "('chk-b', 'item-a', 'checking', 'Conta da Bia', '****0003', 'bia-p');"
+        "UPDATE accounts SET owner_person_id = 'ana-p' WHERE id = 'chk';"
+        "INSERT INTO household_docs (doc_hash, person_id, source) VALUES "
+        "('hash-bia', 'bia-p', 'manual');"
+    )
+    add_tx(conn, "2026-10-02", -100_00, account="chk")
+    add_tx(conn, "2026-10-03", -40_00, account="chk-b")  # same profile, other person
+    add_tx(conn, "2026-10-04", -7_00, account="card", profile="bia")  # unowned: profile Bia
+    add_tx(conn, "2026-10-05", -300_00, "PAGAMENTO DE FATURA", account="chk",
+           category="Credit card payment", excluded="card_bill_payment")  # fmt: skip
+    add_tx(conn, "2026-10-06", -50_00, "PIX ENVIADO BIA", account="chk", category="Transfers",
+           op="PIX", doc_hash="hash-bia", doc_type="CPF", excluded="internal_transfer")  # fmt: skip
+    add_tx(conn, "2026-10-06", 50_00, "PIX RECEBIDO ANA", account="chk-b", category="Transfers",
+           op="PIX", excluded="internal_transfer")  # fmt: skip
+    add_tx(conn, "2026-10-08", -200_00, "APLICACAO RDB", account="chk-b",
+           category="Investments", excluded="investment")  # fmt: skip
+    add_tx(conn, "2026-10-09", -30_00, "PIX ENVIADO Fulano De Tal", account="chk",
+           category="Transfers", op="PIX", doc_hash="hash-x", doc_type="CPF",
+           excluded="refund_pair")  # fmt: skip
+    conn.commit()
+    return conn
+
+
+def test_spending_by_person_uses_account_owner(household: sqlite3.Connection) -> None:
+    out = tools().spending_summary("2026-10", "person")
+    assert {i["key"]: i["amount"]["cents"] for i in out["items"]} == {
+        "Ana Pessoa": 100_00,
+        "Bia Pessoa": 40_00,
+        "Bia": 7_00,  # card without owner: its profile stands for the person
+    }
+    assert out["total"]["cents"] == 147_00
+    by_profile = tools().spending_summary("2026-10", "profile")
+    assert {i["key"]: i["amount"]["cents"] for i in by_profile["items"]} == {
+        "Ana": 140_00,
+        "Bia": 7_00,
+    }
+
+
+def test_people_filter(household: sqlite3.Connection) -> None:
+    assert tools().spending_summary("2026-10", people=["bia pessoa"])["total"]["cents"] == 40_00
+    assert tools().spending_summary("2026-10", people=["bia-p"])["total"]["cents"] == 40_00
+    # unowned accounts match the profile id or name
+    assert tools().spending_summary("2026-10", people=["bia"])["total"]["cents"] == 7_00
+    both = tools().compare_periods("2026-09", "2026-10", people=["ana-p", "bia-p"])
+    assert both["total_b"]["cents"] == 140_00
+    top = tools().top_merchants("2026-10", people=["ana-p"])
+    assert top["by_amount"][0]["amount"]["cents"] == 100_00
+    found = tools().find_transactions(query="pix", period="2026-10", people=["bia-p"])
+    assert [r["person"] for r in found["rows"]] == ["Bia Pessoa"]
+
+
+def test_status_lists_people_and_owners(household: sqlite3.Connection) -> None:
+    out = tools().status()
+    assert out["ownership"] == "people"
+    assert {p["person"]: p["accounts"] for p in out["people"]} == {
+        "Ana Pessoa": 1,
+        "Bia Pessoa": 1,
+    }
+    owners = {a["id"]: (a["owner"], a["owner_source"]) for a in out["accounts"]}
+    assert owners["chk-b"] == ("Bia Pessoa", "person")
+    assert owners["card"] == ("Bia", "profile")
+    assert out["household_docs"] == 2
+    assert "1 conta(s) sem dono" in out["summary"]
+
+
+def test_excluded_items(household: sqlite3.Connection) -> None:
+    out = tools().excluded_items("2026-10")
+    totals = {
+        r["reason"]: (r["out"]["cents"], r["in"]["cents"], r["count"]) for r in out["by_reason"]
+    }
+    assert totals == {
+        "card_bill_payment": (300_00, 0, 1),
+        "internal_transfer": (50_00, 50_00, 2),
+        "investment": (200_00, 0, 1),
+        "refund_pair": (30_00, 0, 1),
+    }
+    assert len(out["rows"]) == 5 and not out["truncated"]
+    text = dumps(out)
+    assert "Fulano" not in text and PERSON_LABEL in text  # third party masked
+    assert "PIX ENVIADO BIA" in text  # household member: not masked
+    only = tools().excluded_items("2026-10", reason="investment", people=["bia-p"])
+    assert [r["reason"] for r in only["rows"]] == ["investment"]
+    assert only["rows"][0]["person"] == "Bia Pessoa"
+    with pytest.raises(ToolError, match="reason"):
+        tools().excluded_items("2026-10", reason="bogus")  # type: ignore[arg-type]
+
+
+def test_excluded_items_caps_rows(conn: sqlite3.Connection) -> None:
+    for i in range(60):
+        add_tx(conn, "2026-10-10", -(i + 1), "APLICACAO", excluded="investment")
+    conn.commit()
+    out = tools().excluded_items("2026-10")
+    assert len(out["rows"]) == MAX_ROWS and out["truncated"]
+    assert out["by_reason"][0]["count"] == 60

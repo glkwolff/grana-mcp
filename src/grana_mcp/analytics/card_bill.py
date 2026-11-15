@@ -39,12 +39,15 @@ class CardTx:
     amount_cents: int  # internal convention: purchase < 0, payment/refund > 0
     operation_type: str | None = None
     provider_category: str | None = None
+    excluded_reason: str | None = None  # set by pipeline/dedupe.py
 
     @property
     def is_payment(self) -> bool:
-        return (self.operation_type or "").upper() == PAYMENT_OPERATION or (
-            self.provider_category or ""
-        ).strip().lower() == PAYMENT_CATEGORY
+        return (
+            self.excluded_reason == "card_bill_payment"
+            or (self.operation_type or "").upper() == PAYMENT_OPERATION
+            or (self.provider_category or "").strip().lower() == PAYMENT_CATEGORY
+        )
 
 
 @dataclass(frozen=True, slots=True)
