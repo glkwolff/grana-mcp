@@ -16,6 +16,7 @@ function inline(text, key = 0) {
   return out;
 }
 
+const NUMERIC = /^[\s\-+−R$%\d.,x×/kgml]*\d[\s\-+−R$%\d.,x×/kgml]*$/i;
 const isRow = (l) => /^\s*\|.*\|\s*$/.test(l);
 const isSep = (l) => /^\s*\|[\s:|-]+\|\s*$/.test(l);
 const isItem = (l) => /^\s*([-*]|\d+[.)])\s+/.test(l);
@@ -34,7 +35,7 @@ export function Markdown({ text }) {
       blocks.push(
         <div class="tablewrap" key={k++}><table>
           <thead><tr>{head.map((c, j) => <th key={j}>{inline(c)}</th>)}</tr></thead>
-          <tbody>{body.map((r, j) => <tr key={j}>{r.map((c, n) => <td key={n}>{inline(c)}</td>)}</tr>)}</tbody>
+          <tbody>{body.map((r, j) => <tr key={j}>{r.map((c, n) => <td key={n} class={NUMERIC.test(c) ? "n" : undefined}>{inline(c)}</td>)}</tr>)}</tbody>
         </table></div>
       );
       continue;

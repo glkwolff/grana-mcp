@@ -16,6 +16,8 @@ Volume=grana-claude:/home/grana/.claude
 Volume=/usr/bin/tailscale:/usr/bin/tailscale:ro
 Volume=/var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock
 Environment=GRANA_WEB_TRUSTED_PROXY=PROXY_IP
+# Menor Preço blocks automated access (fake data); lookups are off by default anyway.
+Environment=GRANA_PRICES=off
 Secret=grana-claude-token,type=env,target=CLAUDE_CODE_OAUTH_TOKEN
 NoNewPrivileges=true
 DropCapability=ALL

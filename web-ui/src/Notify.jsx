@@ -27,6 +27,19 @@ async function post(path, sub) {
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `erro ${res.status}`);
 }
 
+/** Asks permission and subscribes this device. Returns "on" | "off" | "denied" | "homescreen" | "unsupported". */
+export async function enablePush() {
+  if (isIOS() && !standalone()) return "homescreen";
+  if (!supported()) return "unsupported";
+  const perm = await Notification.requestPermission();
+  if (perm !== "granted") return perm === "denied" ? "denied" : "off";
+  const { key } = await getJSON("/api/push/key");
+  const reg = await navigator.serviceWorker.ready;
+  const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(key) });
+  await post("/api/push/subscribe", sub);
+  return "on";
+}
+
 export function Notify() {
   const [state, setState] = useState("loading"); // loading|http|homescreen|nokey|denied|off|on|busy
   const [error, setError] = useState("");
@@ -49,13 +62,8 @@ export function Notify() {
   const enable = async () => {
     setError(""); setState("busy");
     try {
-      const perm = await Notification.requestPermission();
-      if (perm !== "granted") return setState(perm === "denied" ? "denied" : "off");
-      const { key } = await getJSON("/api/push/key");
-      const reg = await navigator.serviceWorker.ready;
-      const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(key) });
-      await post("/api/push/subscribe", sub);
-      setState("on");
+      const r = await enablePush();
+      setState(r === "unsupported" ? "http" : r);
     } catch (e) { setError(e.message); setState("off"); }
   };
 

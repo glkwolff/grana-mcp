@@ -96,6 +96,25 @@ O timer `grana-notify` roda **no host** a cada 15 min: a chave VAPID fica no key
 
 Pelo HTTPS, quem você é vem do cabeçalho `Tailscale-User-Login` que o `tailscale serve` coloca, aceito só em conexões vindas do IP do próprio PC (`GRANA_WEB_TRUSTED_PROXY` no Quadlet).
 
+## Retrato da casa, memória e consumo de tokens
+
+- **Retrato da casa:** no começo de cada conversa, o servidor monta um resumo de ~400 tokens a partir do SQLite e o anexa ao prompt do sistema, num bloco `<retrato_da_casa>` marcado como dado. Ele traz o mês atual contra a média, o gasto típico por categoria, orçamentos, objetivos, recorrentes, faturas, alguns hábitos tirados dos dados (dia em que cai a maior entrada, frequência de delivery) e a memória da família. O texto fica igual durante a conversa inteira, para o cache de prompt do Claude reaproveitá-lo. Também existe como ferramenta MCP (`household_context`), para outros clientes.
+- **Memória da família:** notas curtas (`remember`, `forget`, `recall`) que alguém da casa contou no chat, ou anotou no cartão "O que o grana sabe sobre vocês" do Painel, onde qualquer um pode apagar. A busca usa FTS5 do SQLite (sem acento, sem embeddings, nada sai do PC). As ferramentas instruem o modelo a nunca guardar texto vindo de transações. Limite de 100 notas.
+- **Ferramentas compactas:** `overview` (um período inteiro numa chamada) e `explain_category` respondem em texto curto. No chat web, `status`, `compare_periods`, `top_merchants`, `excluded_items` e `household_context` ficam ocultas (`--disallowedTools`), porque o retrato e o `overview` cobrem o mesmo.
+- **Medição:** cada resposta mostra quantas consultas fez e quantos tokens leu. `grana-mcp web usage` mostra as médias por dia e pessoa (só contagens, nunca o texto).
+
+## Cozinha (dieta e compras da casa)
+
+A aba **Cozinha** e as ferramentas `kitchen_status`, `set_diet_profile`, `set_kitchen_rules`, `log_weight`, `log_day`, `set_meal_plan`, `meal_plan`, `shopping_list`, `find_prices`, `markets` e `set_market` juntam a dieta com o financeiro:
+
+- **Cardápio compartilhado:** a casa come o mesmo prato, escrito para uma porção de referência de 2000 kcal. Cada pessoa come a sua porção (`meta diária / 2000`). As metas vêm de fórmula (Mifflin-St Jeor, fator de atividade, −500 kcal para perder, com piso), não do modelo. São estimativas, não orientação médica.
+- **Definido com vocês:** o chat pergunta o que falta (altura, ano de nascimento, rotina, restrições, gostos, meta, teto semanal) e confirma antes de salvar.
+- **Registro leve:** peso uma vez por semana e um "seguimos o plano hoje?" (sim/não). O resto vem do extrato: gasto de Mercado, Delivery e Restaurantes na semana contra o teto, e pedidos de delivery contra o combinado.
+- **Mercados e preços:** os mercados perto de casa vêm do **OpenStreetMap** (supermercado, atacado, hortifrúti, açougue, feira, peixaria; padarias e mercearias só as mais próximas), com endereço e distância. Os preços são **anotados pela casa** no chat ("arroz 5 kg 27,90 no Zamprogna", ferramenta `note_price`) e valem por 60 dias; o mercado onde se anotou vira favorito. A lista de compras soma o cardápio para todos (menos o que já tem em casa), escolhe um mercado, ou dois quando o segundo economiza pelo menos R$ 15 e 5% da compra, e compara o custo com o teto semanal.
+- **Por que não há busca automática de preços:** o Menor Preço (Nota Paraná) bloqueia acesso automatizado: devolve nomes de mercado embaralhados e preços falsos, primeiro para IPs de datacenter e depois também para uma conexão residencial. O cliente continua no código, mas desligado (só liga com `GRANA_PRICES=on`), e o grana não tenta contornar o bloqueio.
+- **Mercados:** a localização vem do navegador ("usar minha localização") e é guardada como uma área de ~1 km (geohash de 6 letras), nunca o ponto exato. Marque com ★ onde vocês compram.
+- **Avisos:** domingo à tarde (montar o cardápio), segunda de manhã (pesar), à noite (seguiram o plano?) e quando o delivery passa do combinado. Só depois que existe um perfil de dieta.
+
 ## Mexer na página
 
 O código da página fica em `web-ui/` (Vite + Preact). O build vai direto para `src/grana_mcp/web/static/` e é commitado, então quem instala o pacote não precisa de Node.

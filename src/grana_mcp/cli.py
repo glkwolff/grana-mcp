@@ -834,6 +834,27 @@ def web_tailscale_list() -> None:
     typer.echo("\n".join(f"{k} -> {v}" for k, v in users.items()) or "Nenhuma conta.")
 
 
+@web_app.command("usage")
+def web_usage(days: Annotated[int, typer.Option(help="Últimos N dias.")] = 7) -> None:
+    """Tokens por pergunta no chat (médias por dia e pessoa; nunca o conteúdo)."""
+    from grana_mcp.web import usage
+
+    with db_conn() as conn:
+        rows = usage.summary(conn, days)
+    if not rows:
+        typer.echo("Nenhuma pergunta registrada.")
+        return
+    typer.echo("dia         pessoa     perguntas  ferramentas  novos  do cache  saída  seg")
+    for r in rows:
+        typer.echo(
+            f"{r['day']}  {r['user']:<10} {r['questions']:>9}  {r['tools']:>11}  "
+            f"{r['fresh']:>5}  {r['cached']:>8}  {r['output']:>5}  {r['seconds'] or 0:>3}"
+        )
+    typer.echo(
+        "Médias por pergunta. 'novos' = tokens lidos sem cache; 'do cache' saem mais barato."
+    )
+
+
 @web_ts_app.command("remove")
 def web_tailscale_remove(login: str) -> None:
     """Revoga o acesso de uma conta do Tailscale."""

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import stat
 import sys
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +19,7 @@ from grana_mcp.web import claude_runner as cr
 from grana_mcp.web.app import create_app
 
 runner = CliRunner()
+NO_USAGE = dict.fromkeys(("input", "cache_read", "cache_write", "output", "turns", "ms"))
 
 FAKE_CLAUDE = r"""#!{python}
 import json, sys
@@ -36,7 +39,9 @@ out({{"type": "stream_event", "event": {{"type": "content_block_delta",
 out({{"type": "stream_event", "event": {{"type": "content_block_delta",
      "delta": {{"type": "text_delta", "text": "R$ 10"}}}}}})
 resumed = "--resume" in args
-out({{"type": "result", "subtype": "success", "is_error": False,
+out({{"type": "result", "subtype": "success", "is_error": False, "num_turns": 2,
+     "duration_ms": 1500, "usage": {{"input_tokens": 12, "cache_read_input_tokens": 9000,
+     "cache_creation_input_tokens": 300, "output_tokens": 80}},
      "result": "Gasto: R$ 10" + (" (resume)" if resumed else "")}})
 """
 
@@ -124,7 +129,7 @@ def test_prepare_writes_mcp_config(tmp_path: Path) -> None:
         ('{"type": "stream_event", "event": {"type": "message_start"}}', None),
         (
             '{"type": "result", "subtype": "success", "result": "ok"}',
-            {"type": "done", "result": "ok"},
+            {"type": "done", "result": "ok", "usage": NO_USAGE},
         ),
     ],
 )
@@ -163,7 +168,19 @@ def test_chat_streams_and_resumes(client: TestClient) -> None:
     first = events(client.post("/api/chat", json={"message": "quanto?"}, headers=h).text)
     assert {"type": "tool", "name": "spending_summary"} in first
     assert "".join(str(e["text"]) for e in first if e["type"] == "text") == "Gasto: R$ 10"
-    assert first[-1] == {"type": "done", "result": "Gasto: R$ 10"}
+    assert first[-1]["type"] == "done" and first[-1]["result"] == "Gasto: R$ 10"
+    assert first[-1]["usage"] == {
+        "input": 12, "cache_read": 9000, "cache_write": 300, "output": 80, "turns": 2, "ms": 1500
+    }  # fmt: skip
+    from grana_mcp.store import db
+    from grana_mcp.web import usage
+
+    conn = db.connect(config.db_path())
+    row = conn.execute("SELECT * FROM chat_usage").fetchone()
+    assert (row["user"], row["ok"], row["tool_calls"], row["cache_read"]) == ("ana", 1, 1, 9000)
+    assert usage.summary(conn)[0]["questions"] == 1
+    assert usage.context_tokens(first[-1]["usage"]) == 9312
+    conn.close()
     second = events(client.post("/api/chat", json={"message": "e agora?"}, headers=h).text)
     assert second[-1]["result"] == "Gasto: R$ 10 (resume)"
     assert client.post("/api/new", headers=h).json() == {"ok": True}
@@ -190,12 +207,12 @@ def test_cli_web_tokens_and_serve_guards(monkeypatch: pytest.MonkeyPatch) -> Non
     assert refused.exit_code == 1 and "Recusado" in refused.output
     no_users = runner.invoke(cli.app, ["web", "serve"])
     assert no_users.exit_code == 1 and "token add" in no_users.output
-    added = runner.invoke(cli.app, ["web", "token", "add", "gabi"])
+    added = runner.invoke(cli.app, ["web", "token", "add", "bia"])
     assert added.exit_code == 0
     token = added.output.strip().splitlines()[1]
     assert f"#token={token}" in added.output
-    assert auth.verify(token) == "gabi"
-    assert "gabi" in runner.invoke(cli.app, ["web", "token", "list"]).output
+    assert auth.verify(token) == "bia"
+    assert "bia" in runner.invoke(cli.app, ["web", "token", "list"]).output
     assert runner.invoke(cli.app, ["web", "token", "add", "X Y"]).exit_code == 1
     calls: list[dict[str, object]] = []
     monkeypatch.setattr("uvicorn.run", lambda app, **kw: calls.append(kw))
@@ -203,8 +220,8 @@ def test_cli_web_tokens_and_serve_guards(monkeypatch: pytest.MonkeyPatch) -> Non
     served = runner.invoke(cli.app, ["web", "serve", "--host", "10.0.0.1"])
     assert served.exit_code == 0, served.output
     assert calls[0]["host"] == "10.0.0.1"
-    assert runner.invoke(cli.app, ["web", "token", "remove", "gabi"]).exit_code == 0
-    assert runner.invoke(cli.app, ["web", "token", "remove", "gabi"]).exit_code == 1
+    assert runner.invoke(cli.app, ["web", "token", "remove", "bia"]).exit_code == 0
+    assert runner.invoke(cli.app, ["web", "token", "remove", "bia"]).exit_code == 1
     assert "Nenhum" in runner.invoke(cli.app, ["web", "token", "list"]).output
 
 
@@ -220,6 +237,23 @@ def test_board_api_and_actor_config(client: TestClient, tmp_path: Path) -> None:
     client.post("/api/chat", json={"message": "oi"}, headers=h)
     cfg = json.loads((tmp_path / "work" / "grana-mcp-bia.json").read_text())
     assert cfg["mcpServers"]["grana"]["env"]["GRANA_ACTOR"] == "bia"
+    assert cfg["mcpServers"]["grana"]["env"]["GRANA_CHAT_DEVICE"] == "1"
+
+
+def test_heartbeat_while_the_model_is_quiet() -> None:
+    from grana_mcp.web.app import _with_heartbeat
+
+    async def slow() -> AsyncIterator[dict[str, Any]]:
+        yield {"type": "text", "text": "a"}
+        await asyncio.sleep(0.05)
+        yield {"type": "done"}
+
+    async def collect() -> list[dict[str, Any] | None]:
+        return [e async for e in _with_heartbeat(slow(), every=0.01)]
+
+    out = asyncio.run(collect())
+    assert out[0] == {"type": "text", "text": "a"} and out[-1] == {"type": "done"}
+    assert None in out  # at least one ping during the pause
 
 
 # --- rate limits ---
@@ -364,7 +398,7 @@ def test_dashboard_apis(client: TestClient) -> None:
 def test_identity_behind_serve(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     # TestClient connects as "testclient": pretend that is the PC (the proxy).
     monkeypatch.setattr(auth, "trusted_proxies", lambda: {"testclient"})
-    owners = {"testclient": "gabriel", "100.64.0.7": "bia"}
+    owners = {"testclient": "ana", "100.64.0.7": "bia"}
 
     async def fake_ts_user(ip: str, tailscale_bin: str = "tailscale") -> str | None:
         return owners.get(ip)
@@ -377,6 +411,6 @@ def test_identity_behind_serve(client: TestClient, monkeypatch: pytest.MonkeyPat
 
     assert me({auth.LOGIN_HEADER: "bia@github"}).json() == {"user": "bia"}
     assert me({"X-Forwarded-For": "1.2.3.4, 100.64.0.7"}).json() == {"user": "bia"}
-    assert me({}).json() == {"user": "gabriel"}  # browser on the PC itself
-    assert me({"X-Forwarded-For": "lixo"}).json() == {"user": "gabriel"}
+    assert me({}).json() == {"user": "ana"}  # browser on the PC itself
+    assert me({"X-Forwarded-For": "lixo"}).json() == {"user": "ana"}
     assert auth.forwarded_peer("100.64.0.7") == "100.64.0.7" and auth.forwarded_peer("x") is None

@@ -20,7 +20,7 @@ from typing import Literal
 from grana_mcp.config import ensure_private_dir
 from grana_mcp.providers.base import Account, Bill, Item, Transaction
 
-LATEST_VERSION = 5  # bump together with a new store/migrations/NNNN_*.sql
+LATEST_VERSION = 10  # bump together with a new store/migrations/NNNN_*.sql
 _MIGRATION_RE = re.compile(r"^(\d{4})_[a-z0-9_]+\.sql$")
 
 # Provider-owned transaction columns. Re-syncs overwrite only these; columns

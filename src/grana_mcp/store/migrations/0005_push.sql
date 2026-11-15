@@ -3,7 +3,7 @@
 
 CREATE TABLE push_subscriptions (
     id         INTEGER PRIMARY KEY,
-    user       TEXT NOT NULL,                  -- web user (gabriel, gabi, ...)
+    user       TEXT NOT NULL,                  -- web user (ana, bia, ...)
     endpoint   TEXT NOT NULL UNIQUE,           -- push service URL (allowlisted hosts)
     p256dh     TEXT NOT NULL,                  -- browser public key (base64url)
     auth       TEXT NOT NULL,                  -- browser auth secret (base64url)

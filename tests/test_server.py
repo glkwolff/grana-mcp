@@ -20,6 +20,11 @@ from grana_mcp.server import MAX_ROWS, GranaTools, build_server
 from grana_mcp.store import db
 
 TODAY = date(2026, 11, 15)
+KITCHEN_TOOLS = {
+    "kitchen_status", "set_diet_profile", "set_kitchen_rules", "log_weight", "log_day",
+    "set_meal_plan", "meal_plan", "shopping_list", "find_prices", "markets", "set_market",
+    "note_price",
+}  # fmt: skip
 _ids = itertools.count(1)
 
 
@@ -350,6 +355,19 @@ def test_card_bills_without_bills(conn: sqlite3.Connection) -> None:
 # --- MCP wiring ---
 
 
+def test_device_tools_only_in_web_chat(monkeypatch: pytest.MonkeyPatch) -> None:
+    def names() -> set[str]:
+        server = build_server(config.db_path(), lambda: TODAY)
+        return {t.name for t in asyncio.run(server.list_tools())}
+
+    assert "request_location" not in names()  # stdio clients (Claude Desktop) have no phone
+    monkeypatch.setenv("GRANA_CHAT_DEVICE", "1")
+    assert {"request_location", "request_notifications"} <= names()
+    server = build_server(config.db_path(), lambda: TODAY)
+    out = asyncio.run(server.call_tool("request_location", {}))
+    assert "não peça para a pessoa clicar" in str(out).lower()
+
+
 def test_mcp_registration(conn: sqlite3.Connection) -> None:
     seed_october(conn)
     server = build_server(config.db_path(), lambda: TODAY)
@@ -371,15 +389,24 @@ def test_mcp_registration(conn: sqlite3.Connection) -> None:
         "delete_goal",
         "post_notice",
         "delete_notice",
+        "household_context",
+        "overview",
+        "explain_category",
+        "remember",
+        "forget",
+        "recall",
+        *KITCHEN_TOOLS,
     }
     assert not any("sync" in n for n in names)
     for t in listed:
         assert t.annotations is not None
         # Only these write, and only to the local database.
         writers = {"set_category_rule", "set_budget", "set_goal", "delete_goal",
-                   "post_notice", "delete_notice"}  # fmt: skip
+                   "post_notice", "delete_notice", "remember", "forget",
+                   *(KITCHEN_TOOLS - {"kitchen_status", "meal_plan"})}  # fmt: skip
         assert t.annotations.read_only_hint is (t.name not in writers)
-    for name in ("spending_summary", "top_merchants", "find_transactions", "excluded_items"):
+    for name in ("spending_summary", "top_merchants", "find_transactions", "excluded_items",
+                 "overview", "explain_category", "household_context"):  # fmt: skip
         desc = next(t.description for t in listed if t.name == name) or ""
         assert "NÃO confiáveis" in desc
 

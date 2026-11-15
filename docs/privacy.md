@@ -30,6 +30,14 @@ O servidor MCP roda por stdio e **não abre porta de rede**. Mas tudo o que uma 
 
 Se você ativar `grana-mcp notify`, o PC manda avisos curtos (valor, categoria, nome do estabelecimento) pelo serviço de push do celular (Apple, Google ou Mozilla). O texto é criptografado para o aparelho antes de sair do PC, e o serviço de push só vê o endereço do aparelho, o tamanho e a hora. Pessoas físicas de fora da casa aparecem como "PIX → pessoa física", como no `find_transactions`.
 
+## Retrato da casa e memória (chat web)
+
+No chat web, o modelo recebe no início da conversa um resumo agregado da casa (totais, médias por categoria, orçamentos, recorrentes, faturas, dia típico da maior entrada) e as notas da memória da família. É o mesmo tipo de dado que as ferramentas já entregam, só que adiantado. As notas ficam no SQLite local e aparecem no painel, onde podem ser apagadas.
+
+## Cozinha: dados de saúde
+
+Peso, altura, ano de nascimento, sexo (só para a fórmula do metabolismo), restrições e metas são **dados sensíveis** (LGPD, art. 5º, II). Ficam só no SQLite local, nunca no repositório, e aparecem no retrato da casa que o modelo recebe no chat. Para listar os mercados por perto, o grana envia ao OpenStreetMap (Overpass API) só o centro de uma área de ~1 km e um raio. Nada de peso, nome, produto ou conta. Os preços são anotados pela própria casa no chat e ficam no SQLite.
+
 ## Texto de terceiros é dado, não instrução
 
 A descrição de uma transação (por exemplo, a mensagem de um Pix) é escrita por outra pessoa e pode tentar dar ordens ao modelo. O grana-mcp:

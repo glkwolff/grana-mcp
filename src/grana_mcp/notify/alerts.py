@@ -325,6 +325,70 @@ def notice_alerts(conn: sqlite3.Connection, today: date) -> list[Alert]:
     return out
 
 
+def kitchen_alerts(conn: sqlite3.Connection, now: datetime) -> list[Alert]:
+    """Diet routine: plan the week (Sunday), weigh-in (Monday), daily check-in, delivery cap."""
+    from grana_mcp.kitchen import store
+
+    if not store.profiles(conn):
+        return []
+    today = now.date()
+    mon = store.monday(today)
+    out = []
+    if today.weekday() == 6 and now.hour >= 17:
+        nxt = mon + timedelta(days=7)
+        if not store.week(conn, nxt):
+            out.append(
+                Alert(
+                    f"plan:{nxt.isoformat()}",
+                    "Bora montar o cardápio da semana?",
+                    "Peçam no chat: 'monta o cardápio da semana que vem'. "
+                    "A lista de compras sai junto.",
+                    url="/#cozinha",
+                    tag="plan",
+                )
+            )
+    if today.weekday() == 0 and now.hour >= 8:
+        weighed = {w["person_id"] for w in store.weights(conn, mon)}
+        missing = [p["name"] for p in store.profiles(conn) if p["person_id"] not in weighed]
+        if missing:
+            out.append(
+                Alert(
+                    f"weigh:{mon.isoformat()}",
+                    "Dia de pesar",
+                    f"Falta o peso de {' e '.join(missing)} desta semana. Toque para registrar.",
+                    url="/#cozinha",
+                    tag="weigh",
+                )
+            )
+    if now.hour >= 20 and not store.days(conn, today):
+        out.append(
+            Alert(
+                f"day:{today.isoformat()}",
+                "Seguiram o plano hoje?",
+                "Toque para responder sim ou não.",
+                url="/#cozinha",
+                tag="day",
+            )
+        )
+    rules = store.rules(conn)
+    cap = rules["delivery_max_week"] if rules else None
+    if cap is not None:
+        orders = queries.spending_total(
+            conn, Period(mon, today, "semana"), today, queries.Filters(categories=["Delivery"])
+        ).count
+        if orders > cap:
+            out.append(
+                Alert(
+                    f"deliv:{mon.isoformat()}:{orders}",
+                    f"Delivery: {orders} pedidos na semana",
+                    f"O combinado era até {cap}.",
+                    url="/#cat=Delivery",
+                    tag="deliv",
+                )
+            )
+    return out
+
+
 def collect(
     conn: sqlite3.Connection,
     now: datetime,
@@ -340,6 +404,7 @@ def collect(
         *notice_alerts(conn, today),
         *purchase_alerts(conn, today, s.big_purchase_cents, s.purchases),
         *recurring_alerts(conn, today),
+        *kitchen_alerts(conn, now),
     ]
     if s.weekly:
         alerts += weekly_alert(conn, now)
