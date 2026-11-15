@@ -13,7 +13,10 @@ RUN apt-get update \
 COPY dist/grana_mcp-*.whl /tmp/
 RUN pip install --no-cache-dir /tmp/grana_mcp-*.whl && rm /tmp/grana_mcp-*.whl
 
-RUN useradd --create-home --uid 1000 grana
+RUN useradd --create-home --uid 1000 --shell /usr/sbin/nologin grana \
+ # sem setuid/setgid: mesmo que no-new-privileges falhasse, não há como virar root
+ && find / -xdev -perm /6000 -type f -exec chmod a-s {} + \
+ && passwd -l root
 USER grana
 # /data/config: config.json (itemIds, sem segredos) e web_tokens.json (só hashes)
 # /data/data:   grana.db (o sync roda no host; aqui só leitura + regras de categoria)

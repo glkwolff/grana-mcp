@@ -11,7 +11,7 @@ ContainerName=grana-web
 UserNS=keep-id
 # Só no IP do WireGuard: quem não é peer da VPN não alcança a porta.
 PublishPort=WG_IP:8765:8765
-Volume=%h/.config/grana-mcp:/data/config:Z
+Volume=%h/.config/grana-mcp:/data/config:ro,Z
 Volume=%h/.local/share/grana-mcp:/data/data:Z
 Volume=grana-claude:/home/grana/.claude:Z
 # Token do Claude gerado com `claude setup-token` e guardado com:
