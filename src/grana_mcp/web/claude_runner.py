@@ -40,8 +40,9 @@ PASS_ENV = (
     "XDG_RUNTIME_DIR",
     "DBUS_SESSION_BUS_ADDRESS",
     config.ENV_HOME,
-    "CLAUDE_CODE_OAUTH_TOKEN",
-    "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",  # subscription token from `claude setup-token`
+    # ANTHROPIC_API_KEY is deliberately NOT passed: the chat must use the Claude
+    # subscription, never pay-per-use API billing.
     "CLAUDE_CONFIG_DIR",
 )
 

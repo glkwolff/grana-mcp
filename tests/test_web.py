@@ -101,7 +101,9 @@ def test_child_env_never_carries_pluggy_secrets(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv(config.ENV_CLIENT_SECRET, "segredo")
     monkeypatch.setenv(config.ENV_CLIENT_ID, "id")
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "tok")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-paga")
     env = cr.child_env()
+    assert "ANTHROPIC_API_KEY" not in env  # never pay-per-use API billing
     assert config.ENV_CLIENT_SECRET not in env and config.ENV_CLIENT_ID not in env
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "tok"
 
