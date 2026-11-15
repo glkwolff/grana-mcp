@@ -1,0 +1,20 @@
+[Unit]
+Description=grana sync (Meu Pluggy -> SQLite)
+After=network-online.target
+
+[Container]
+Image=localhost/grana-web:latest
+UserNS=keep-id:uid=1000,gid=1000
+Exec=grana-mcp sync
+Volume=%h/grana/config:/data/config:ro
+Volume=%h/grana/data:/data/data
+Secret=grana-pluggy-id,type=env,target=GRANA_PLUGGY_CLIENT_ID
+Secret=grana-pluggy-secret,type=env,target=GRANA_PLUGGY_CLIENT_SECRET
+NoNewPrivileges=true
+DropCapability=ALL
+ReadOnly=true
+Tmpfs=/tmp
+PodmanArgs=--memory=384m
+
+[Service]
+Type=oneshot

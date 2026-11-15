@@ -1,0 +1,19 @@
+[Unit]
+Description=grana notify (avisos pendentes -> Web Push)
+After=network-online.target
+
+[Container]
+Image=localhost/grana-web:latest
+UserNS=keep-id:uid=1000,gid=1000
+Exec=grana-mcp notify run
+Volume=%h/grana/config:/data/config:ro
+Volume=%h/grana/data:/data/data
+Secret=grana-vapid,type=env,target=GRANA_VAPID_PRIVATE_KEY
+NoNewPrivileges=true
+DropCapability=ALL
+ReadOnly=true
+Tmpfs=/tmp
+PodmanArgs=--memory=256m
+
+[Service]
+Type=oneshot

@@ -1,0 +1,30 @@
+[Unit]
+Description=grana chat web (Claude Code + MCP grana)
+After=network-online.target
+
+[Container]
+Image=localhost/grana-web:latest
+ContainerName=grana-web
+# uid 1000 da imagem = usuário grana do host
+UserNS=keep-id:uid=1000,gid=1000
+# Só no loopback: quem publica é o `tailscale serve` (HTTPS, só dentro do tailnet).
+PublishPort=127.0.0.1:8765:8765
+Volume=%h/grana/config:/data/config:ro
+Volume=%h/grana/data:/data/data
+Volume=grana-claude:/home/grana/.claude
+# `tailscale whois` para identificar quem conecta
+Volume=/usr/bin/tailscale:/usr/bin/tailscale:ro
+Volume=/var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock
+Environment=GRANA_WEB_TRUSTED_PROXY=PROXY_IP
+Secret=grana-claude-token,type=env,target=CLAUDE_CODE_OAUTH_TOKEN
+NoNewPrivileges=true
+DropCapability=ALL
+ReadOnly=true
+Tmpfs=/tmp
+PodmanArgs=--memory=768m --pids-limit=256
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
