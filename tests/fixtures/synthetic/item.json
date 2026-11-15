@@ -1,0 +1,16 @@
+{
+  "id": "11111111-1111-4111-8111-000000000001",
+  "connector": {"id": 200, "name": "MeuPluggy", "type": "PERSONAL_BANK", "country": "BR", "isOpenFinance": false, "isSandbox": false},
+  "status": "UPDATED",
+  "executionStatus": "SUCCESS",
+  "createdAt": "2026-01-10T12:00:00.000Z",
+  "updatedAt": "2026-11-14T06:00:00.000Z",
+  "lastUpdatedAt": "2026-11-14T06:00:00.000Z",
+  "statusDetail": null,
+  "error": null,
+  "webhookUrl": null,
+  "nextAutoSyncAt": null,
+  "consecutiveFailedLoginAttempts": 0,
+  "consentExpiresAt": "2027-01-10T12:00:00.000Z",
+  "products": ["ACCOUNTS", "CREDIT_CARDS", "TRANSACTIONS"]
+}

@@ -1,0 +1,116 @@
+# Mapeamento Pluggy → modelo interno
+
+Resolve os pontos em aberto **U3** e **U4** do plano. Cada campo cita a fonte. O que não foi possível confirmar está marcado como **NÃO VERIFICADO**. Esses pontos precisam ser conferidos no primeiro sync real e, se for o caso, corrigidos aqui e no código.
+
+Fontes (consultadas em 15/11/2026):
+
+- **[TX]** Transaction: https://docs.pluggy.ai/en/docs/products/transactions.md
+- **[OAS]** OpenAPI oficial: https://docs.pluggy.ai/openapi/pluggy-api.json (schemas `Transaction`, `CreditCardMetadata`, `PaymentData`, `PaymentDataParticipant`, `Document`, `Account`, `Item`, `CursorPageResponseTransactions`)
+- **[BC]** Basic concepts (paginação): https://docs.pluggy.ai/en/docs/reference/basic-concepts.md
+- **[AUTH]** Authentication: https://docs.pluggy.ai/en/docs/reference/authentication.md
+- **[MP]** Meu Pluggy: https://docs.pluggy.ai/en/docs/guides/meu-pluggy-personal-use.md
+- **[CYC]** Cartão e ciclo de fatura: https://docs.pluggy.ai/en/docs/products/credit-card-statement-cycle.md
+- **[INST]** Parcelamento: https://docs.pluggy.ai/en/docs/products/credit-card-installments.md
+- **[PD]** Cobertura de Payment Data: https://docs.pluggy.ai/en/docs/open-finance/payment-data.md
+- **[CAT]** Categorização: https://docs.pluggy.ai/en/docs/products/transaction-categorization.md
+- **[RL]** Rate limits: https://docs.pluggy.ai/en/docs/reference/rate-limits.md
+- **[BP]** Fonte secundária, MIT: brunopedrazza/pluggy-mcp-server, `DESIGN.md`. São medições em 3 itens MeuPluggy reais.
+- **[CB]** Fonte secundária, MIT: TrainedLoop/cashbook-mcp, `pluggy/normalize.py`, `classify.py` e `pluggy/client.py`.
+
+## Endpoints usados (somente leitura)
+
+| Chamada | Uso | Fonte |
+|---|---|---|
+| `POST /auth` `{clientId, clientSecret}` → `{apiKey}` | API key válida por 2 h, enviada no header `X-API-KEY`. `401 CLIENT_KEYS_UNAUTHORIZED` indica credenciais erradas. | [AUTH] |
+| `GET /items/{id}` | `connector.name`, `status`, `consentExpiresAt`, `lastUpdatedAt` | [OAS] `Item`, [MP] |
+| `GET /accounts?itemId=` | Contas do item. A resposta tem `{page, total, totalPages, results}` e o endpoint não documenta parâmetro de página. | [OAS] |
+| `GET /v2/transactions?accountId=&dateFrom=` | Transações. Paginação por cursor, até 500 por página. | [BC], [TX] |
+
+- **v1 `/transactions`:** está deprecated e só funciona até 31/12/2026. Aplicações criadas a partir de 02/06/2026 já recebem `410 Gone` (`ENDPOINT_DEPRECATED`) [BC]. A [BP] mediu o 410 em itens MeuPluggy. Por isso usamos só a `/v2`.
+- **Cursor:** a resposta traz `next`, uma *query string* pronta (`?accountId=…&after=…`) ou `null`. Ela é anexada ao path sem alterações, e o `after` nunca deve ser montado à mão [BC]. O cliente recusa um `next` que aponte para outro host e para se o cursor se repetir.
+- **`dateFrom`/`dateTo`:** usam o formato `yyyy-mm-dd`. `dateFrom` não pode ser combinado com `createdAtFrom` [OAS]. O sync pede `dateFrom = hoje − 365 dias` e não manda `dateTo`, para incluir parcelas futuras e agendamentos `PENDING`.
+- **Listar itens:** `GET /v2/items` não existe para contas Meu Pluggy, então o usuário informa os itemIds [MP].
+- **Refresh:** itens MeuPluggy não aceitam atualização manual nem `PATCH` [MP]. O cliente não tem esse código.
+- **Rate limit:** `429` vem com os headers `RateLimit-Reset` e `Retry-After`. O cliente espera o tempo indicado (no máximo 60 s) e tenta de novo até 3 vezes [RL].
+- **API key expirada:** a key é renovada sozinha depois de 1h50. **NÃO VERIFICADO:** os docs não dizem qual status uma key expirada devolve. O `401` está documentado como "API key is wrong". Por isso o cliente refaz o `/auth` uma vez ao receber `401` ou `403` e repete a chamada [CB faz o mesmo para 401].
+
+## U4 — Convenção de sinal
+
+**Convenção interna:** `amount_cents` é negativo quando o dinheiro sai (gasto) e positivo quando entra.
+
+| Conta | `amount` da Pluggy | `type` da Pluggy | Fonte |
+|---|---|---|---|
+| Cartão de crédito | **positivo = compra** (aumenta a fatura), **negativo = pagamento/crédito** | compra = `DEBIT`, pagamento = `CREDIT` | [TX] "Sign Convention for Credit Card Transactions"; [OAS] `type`: "Pluggy normalizes the value so purchases are always `DEBIT` and payments to the card statement are `CREDIT`" |
+| Conta corrente | **negativo = saída**, positivo = entrada | saída = `DEBIT`, entrada = `CREDIT` | [OAS] exemplo de `/v2/transactions` (`amount: -212.45`, `type: DEBIT`); [TX] exemplo de saldo de fim do dia; [BP] medido: `BANK DEBIT -1338.00`, `CREDIT DEBIT +188.16` |
+
+O sinal de `amount` da conta corrente só aparece documentado **em exemplos**, não em texto normativo. A [BP] confirmou esse sinal com dados reais.
+
+Regra implementada em `providers/pluggy.py::signed_cents`:
+
+1. **Valor absoluto:** usa `amountInAccountCurrency` quando existe e `amount` quando não existe. O `amount` vem na moeda da compra, por exemplo USD num cartão em BRL [OAS], [BP], [CB].
+2. **Sinal:** vem do `type`. `DEBIT` vira negativo e `CREDIT` vira positivo. O `type` é o campo que a OpenAPI documenta como normalizado entre tipos de conta.
+3. **Fallback**, quando `type` vem nulo (o campo não está em `required` na OpenAPI): no cartão, o sinal de `amount` é invertido; nas outras contas, é mantido.
+4. **Conferência:** quando `type` e o sinal de `amount` discordam, a transação é contada como `sign_mismatch`, e o `grana-mcp sync` mostra o total. **No primeiro sync real, esse número deve ser 0.** Se não for, a regra precisa ser revista.
+
+Os testes estão em `tests/test_pluggy_normalize.py`, e há testes de ponta a ponta em `tests/test_sync.py` e `tests/test_cli.py`.
+
+### Centavos
+
+O JSON é lido com `parse_float=Decimal`, então o valor nunca passa por `float`. A conversão para centavos usa `ROUND_HALF_UP`, porque a Pluggy pode mandar mais de 2 casas decimais (ex.: `2431.5285` [BP]).
+
+### Data
+
+`date` é ISO 8601 em UTC. Para ler no horário do Brasil, a doc manda converter para GMT-3 [TX]. A [BP] mediu que as datas são instantes reais (0 de 1.595 caíam à meia-noite UTC), e 4,3% delas mudam de dia quando convertidas. Por isso `posted_date` é o dia em `America/Sao_Paulo`. Exceção: um valor exatamente à meia-noite UTC é tratado como data de calendário e fica como está, para não cair no dia anterior. Isso segue o `plainDay` da [BP].
+
+## U3 — Campos para identificar cada caso
+
+### Pagamento de fatura de cartão
+
+| Lado | Campo | Valor | Status |
+|---|---|---|---|
+| Cartão | `operationType` | `PAGAMENTO_FATURA`. Se a instituição não informa o pagamento, a Pluggy cria a transação "Pagamento recebido" com esse valor. | Documentado [TX], [OAS]. **NÃO VERIFICADO para MeuPluggy:** a OpenAPI diz que `operationType` só vem em conectores Open Finance, e o conector MeuPluggy aparece como *Direct* no Dashboard. |
+| Cartão | `type` = `CREDIT` (`amount` negativo) | crédito na fatura | Documentado [TX], [OAS]. Estornos também são `CREDIT`, então esse campo sozinho não basta. |
+| Conta corrente | `category` | `"Credit card payment"`, subcategoria de *Transfers* | A categoria existe [CAT]. A [BP] e a [CB] (mapa `CATEGORY_KINDS`) encontraram esse valor em dados reais do MeuPluggy. **NÃO VERIFICADO** em Nubank e Itaú especificamente. |
+| Conta corrente | `operationType` | Algo como `BOLETO`, `CARTAO` ou `OUTROS` | **NÃO VERIFICADO.** Nenhuma fonte diz qual valor o débito do pagamento de fatura recebe na conta corrente. |
+| Ambos | `creditCardMetadata.billId` + valor da fatura (`GET /bills`) | Casar o débito na conta com o total da fatura | `billId` só vem em Open Finance [TX]. A [CB] casa o valor do débito com `bills.totalAmount`. Fica para a Fase 3, e `/bills` ainda não é chamado. |
+
+Para a Fase 3: considerar pagamento de fatura o débito em conta corrente com `category == "Credit card payment"`, ou um par débito-na-conta / crédito-no-cartão com o mesmo valor e até ~3 dias de diferença. Validar com Nubank e Itaú reais (golden cases).
+
+### Contraparte de Pix/TED (CPF/CNPJ)
+
+- **Campos:** `paymentData.payer` e `paymentData.receiver` → `documentNumber` = `{type: "CPF"|"CNPJ", value: "<formatado>"}` [OAS] `Document`, [TX]. Também há `paymentData.paymentMethod` (`PIX`, `TED`, `DOC`, `BOLETO`), e `operationType` traz `PIX`, `TED`, `TRANSFERENCIA_MESMA_INSTITUICAO` e outros [TX].
+- **Qual lado é a contraparte:** em saída, o `receiver`; em entrada, o `payer`. Segue a [CB] (`normalize.py`); a doc oficial não diz isso explicitamente.
+- **Cobertura:** o Pix tem cobertura 🟢 (>90%) no Nubank (612) e no Itaú (601) via Open Finance [PD]. **NÃO VERIFICADO** se o conector MeuPluggy repassa `paymentData`. A [BP] viu `paymentData` em 595 transações MeuPluggy, o que é um bom sinal.
+- **Armazenamento:** só os dígitos, e só se forem 11 (CPF) ou 14 (CNPJ). Valores mascarados (`***`) são descartados. O que fica gravado é `SHA-256(sal_local + dígitos)` em `counterpart_doc_hash`. O sal fica em `<data dir>/salt`, com permissão 0600.
+
+### Parcelas
+
+- **Campos:** `creditCardMetadata.installmentNumber` e `creditCardMetadata.totalInstallments` [TX], [OAS]. Também há `purchaseDate` e `paymentType` (`SINGLE` | `INSTALLMENT`, só Open Finance) [OAS]. `totalAmount` só vem em conectores diretos [TX].
+- **Comportamento:** cada banco publica as parcelas de um jeito (todas de uma vez ou mês a mês). As parcelas futuras podem vir `PENDING` e com data futura [INST], [TX]. Para o U5 (parcela no mês em que é cobrada), usamos o `date` de cada parcela.
+
+### Categoria da Pluggy
+
+- **Campos:** `category` (texto em **inglês**, ex.: `Groceries`, `Credit card payment`, `Same person transfer`) e `categoryId` [OAS], [CAT]. A tradução PT fica em `GET /categories` → `descriptionTranslated` [CAT], mas não é usada na Fase 1.
+- **Disponibilidade:** a doc diz que `category` "requires Pro subscription" [TX]. A [BP] encontrou categorias preenchidas em itens MeuPluggy. **NÃO VERIFICADO** na conta deste projeto.
+- `merchant` (`name`, `cnpj`, `category`) também exige Pro [TX]. Gravamos `merchant.name` quando ele vem.
+
+## Outros campos gravados
+
+| Interno | Pluggy | Fonte |
+|---|---|---|
+| `items.consent_expires_at` | `Item.consentExpiresAt`. A autorização Meu Pluggy dura 1 ano. Quando expira, as leituras voltam vazias e o `status` do item pode continuar `UPDATED`. | [MP], [OAS] |
+| `items.status` | `Item.status` | [OAS] |
+| `accounts.kind` | `subtype` `CHECKING_ACCOUNT`→`checking`, `CREDIT_CARD`→`credit_card`, `SAVINGS_ACCOUNT`→`other` | [OAS] `Account` |
+| `accounts.number_masked` | Últimos 4 caracteres de `number`. No cartão, `number` já vem só com os 4 finais. | [OAS] |
+| `transactions.description_raw` | `descriptionRaw` se não for nulo; senão `description` | [OAS] |
+| `transactions.status` | `POSTED` / `PENDING` | [OAS] |
+| `transactions.operation_type` | `operationType` (só Open Finance) | [OAS] |
+
+## IDs que mudam (importante para não contar em dobro)
+
+Quando a fatura fecha, a Pluggy pode **apagar uma transação de cartão e criá-la de novo com outro `id`**, e nada liga o id antigo ao novo [CYC]. Os webhooks resolvem isso, mas não os usamos (o MCP é só local). Por isso o sync relê a janela inteira de cada conta e **apaga as linhas locais daquela conta que a Pluggy não devolveu mais** (`n_deleted` em `sync_runs`). Duas proteções evitam apagar dados por engano:
+
+- Se a leitura de uma conta vier vazia, nada é apagado e aparece um aviso. É o que acontece quando a autorização expira [MP].
+- Se `consentExpiresAt` já passou, nada é apagado.
+
+Reconectar um banco cria um **item novo, com ids novos** [TX], [MP]. Para deduplicar entre itens, `providerId` é o id estável (só Open Finance) [CYC]. Isso fica para a Fase 3.

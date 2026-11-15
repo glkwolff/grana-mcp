@@ -1,0 +1,49 @@
+{
+  "results": [
+    {
+      "id": "33333333-3333-4333-8333-000000000003",
+      "description": "PAGAMENTO FATURA CARTAO SINTETICO",
+      "descriptionRaw": null,
+      "currencyCode": "BRL",
+      "amount": -1234.56,
+      "date": "2026-10-10T12:00:00.000Z",
+      "balance": 4765.94,
+      "category": "Credit card payment",
+      "categoryId": "05100000",
+      "accountId": "22222222-2222-4222-8222-000000000001",
+      "providerCode": null,
+      "type": "DEBIT",
+      "status": "POSTED",
+      "operationType": "OUTROS",
+      "paymentData": null,
+      "creditCardMetadata": null,
+      "merchant": null,
+      "providerId": null,
+      "createdAt": "2026-10-10T13:00:00.000Z",
+      "updatedAt": "2026-10-10T13:00:00.000Z"
+    },
+    {
+      "id": "33333333-3333-4333-8333-000000000004",
+      "description": "PADARIA SINTETICA",
+      "descriptionRaw": null,
+      "currencyCode": "BRL",
+      "amount": -10.1,
+      "date": "2026-10-01T01:30:00.000Z",
+      "balance": 4755.84,
+      "category": "Bakeries",
+      "categoryId": "08010000",
+      "accountId": "22222222-2222-4222-8222-000000000001",
+      "providerCode": null,
+      "type": "DEBIT",
+      "status": "POSTED",
+      "operationType": "CARTAO",
+      "paymentData": null,
+      "creditCardMetadata": null,
+      "merchant": {"name": "Padaria Sintetica", "businessName": "PADARIA SINTETICA LTDA", "cnpj": "00.000.000/0000-00", "cnae": "0000000", "category": "Bakeries"},
+      "providerId": null,
+      "createdAt": "2026-10-01T06:00:00.000Z",
+      "updatedAt": "2026-10-01T06:00:00.000Z"
+    }
+  ],
+  "next": null
+}

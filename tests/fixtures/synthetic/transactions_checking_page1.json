@@ -1,0 +1,58 @@
+{
+  "results": [
+    {
+      "id": "33333333-3333-4333-8333-000000000001",
+      "description": "PIX ENVIADO PESSOA SINTETICA",
+      "descriptionRaw": null,
+      "currencyCode": "BRL",
+      "amount": -150.25,
+      "date": "2026-10-05T14:22:10.123Z",
+      "balance": 850.25,
+      "category": "Transfer - PIX",
+      "categoryId": "05070000",
+      "accountId": "22222222-2222-4222-8222-000000000001",
+      "providerCode": null,
+      "type": "DEBIT",
+      "status": "POSTED",
+      "operationType": "PIX",
+      "paymentData": {
+        "payer": {"name": "Pessoa Sintetica", "documentNumber": {"type": "CPF", "value": "000.000.000-00"}},
+        "receiver": {"name": "Outra Pessoa Sintetica", "documentNumber": {"type": "CPF", "value": "999.999.999-99"}},
+        "paymentMethod": "PIX",
+        "referenceNumber": "E00000000000000000000000000000000"
+      },
+      "creditCardMetadata": null,
+      "merchant": null,
+      "providerId": null,
+      "createdAt": "2026-10-05T15:00:00.000Z",
+      "updatedAt": "2026-10-05T15:00:00.000Z"
+    },
+    {
+      "id": "33333333-3333-4333-8333-000000000002",
+      "description": "SALARIO EMPRESA SINTETICA",
+      "descriptionRaw": "SALARIO EMPRESA SINTETICA LTDA",
+      "currencyCode": "BRL",
+      "amount": 5000.0,
+      "date": "2026-10-01T03:00:00.000Z",
+      "balance": 6000.5,
+      "category": "Salary",
+      "categoryId": "01010000",
+      "accountId": "22222222-2222-4222-8222-000000000001",
+      "providerCode": null,
+      "type": "CREDIT",
+      "status": "POSTED",
+      "operationType": "TED",
+      "paymentData": {
+        "payer": {"name": "Empresa Sintetica", "documentNumber": {"type": "CNPJ", "value": "00.000.000/0000-00"}},
+        "receiver": {"name": "Pessoa Sintetica", "documentNumber": {"type": "CPF", "value": "000.000.000-00"}},
+        "paymentMethod": "TED"
+      },
+      "creditCardMetadata": null,
+      "merchant": null,
+      "providerId": null,
+      "createdAt": "2026-10-01T06:00:00.000Z",
+      "updatedAt": "2026-10-01T06:00:00.000Z"
+    }
+  ],
+  "next": "?accountId=22222222-2222-4222-8222-000000000001&after=c3ludGhldGljLWN1cnNvci0x"
+}
