@@ -1,0 +1,196 @@
+from __future__ import annotations
+
+import json
+import stat
+import sys
+from pathlib import Path
+
+import pytest
+from starlette.testclient import TestClient
+from typer.testing import CliRunner
+
+from grana_mcp import cli, config
+from grana_mcp.web import auth
+from grana_mcp.web import claude_runner as cr
+from grana_mcp.web.app import create_app
+
+runner = CliRunner()
+
+FAKE_CLAUDE = r"""#!{python}
+import json, sys
+args = sys.argv[1:]
+msg = args[args.index("-p") + 1]
+def out(e): print(json.dumps(e), flush=True)
+out({{"type": "system", "subtype": "init"}})
+if msg == "falha":
+    out({{"type": "result", "subtype": "error_during_execution", "is_error": True}})
+    sys.exit(0)
+if msg == "mudo":
+    sys.exit(0)
+out({{"type": "stream_event", "event": {{"type": "content_block_start",
+     "content_block": {{"type": "tool_use", "name": "mcp__grana__spending_summary"}}}}}})
+out({{"type": "stream_event", "event": {{"type": "content_block_delta",
+     "delta": {{"type": "text_delta", "text": "Gasto: "}}}}}})
+out({{"type": "stream_event", "event": {{"type": "content_block_delta",
+     "delta": {{"type": "text_delta", "text": "R$ 10"}}}}}})
+resumed = "--resume" in args
+out({{"type": "result", "subtype": "success", "is_error": False,
+     "result": "Gasto: R$ 10" + (" (resume)" if resumed else "")}})
+"""
+
+
+@pytest.fixture
+def fake_claude(tmp_path: Path) -> Path:
+    path = tmp_path / "claude"
+    path.write_text(FAKE_CLAUDE.format(python=sys.executable))
+    path.chmod(0o755)
+    return path
+
+
+@pytest.fixture
+def client(fake_claude: Path, tmp_path: Path) -> TestClient:
+    cfg = cr.RunnerConfig(claude_bin=str(fake_claude), workdir=tmp_path / "work")
+    return TestClient(create_app(cfg))
+
+
+def events(body: str) -> list[dict[str, object]]:
+    return [json.loads(x[6:]) for x in body.split("\n\n") if x.startswith("data: ")]
+
+
+# --- auth ---
+
+
+def test_tokens_are_hashed_and_private() -> None:
+    token = auth.add_user("Ana")
+    assert auth.verify(token) == "ana"
+    assert auth.verify("errado") is None
+    assert auth.verify(None) is None
+    raw = auth.tokens_path().read_text()
+    assert token not in raw
+    assert stat.S_IMODE(auth.tokens_path().stat().st_mode) == 0o600
+    rotated = auth.add_user("ana")
+    assert auth.verify(token) is None and auth.verify(rotated) == "ana"
+    assert auth.users() == ["ana"]
+    assert auth.remove_user("ana") and not auth.remove_user("ana")
+    with pytest.raises(ValueError):
+        auth.add_user("Nome Com Espaço")
+
+
+# --- runner ---
+
+
+def test_command_is_locked_down() -> None:
+    cfg = cr.RunnerConfig(claude_bin="claude", workdir=Path("/w"))
+    cmd = cr.build_command(cfg, "oi", "ana", "sid", resume=False)
+    assert cmd[cmd.index("--tools") + 1] == ""
+    assert "--strict-mcp-config" in cmd
+    assert cmd[cmd.index("--allowedTools") + 1] == "mcp__grana__*"
+    assert cmd[cmd.index("--setting-sources") + 1] == "project"
+    assert cmd[cmd.index("--session-id") + 1] == "sid"
+    assert "--dangerously-skip-permissions" not in cmd
+    resumed = cr.build_command(cfg, "oi", "ana", "sid", resume=True)
+    assert resumed[resumed.index("--resume") + 1] == "sid"
+    with_model = cr.build_command(
+        cr.RunnerConfig(claude_bin="c", workdir=Path("/w"), model="m"), "x", "a", "s", False
+    )
+    assert with_model[-2:] == ["--model", "m"]
+
+
+def test_child_env_never_carries_pluggy_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(config.ENV_CLIENT_SECRET, "segredo")
+    monkeypatch.setenv(config.ENV_CLIENT_ID, "id")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "tok")
+    env = cr.child_env()
+    assert config.ENV_CLIENT_SECRET not in env and config.ENV_CLIENT_ID not in env
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "tok"
+
+
+def test_prepare_writes_mcp_config(tmp_path: Path) -> None:
+    cfg = cr.RunnerConfig(claude_bin="c", workdir=tmp_path / "w")
+    cr.prepare(cfg)
+    data = json.loads(cfg.mcp_config_path().read_text())
+    assert data["mcpServers"]["grana"]["args"] == ["-m", "grana_mcp", "serve"]
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ("não é json", None),
+        ('{"type": "assistant"}', None),
+        ('{"type": "stream_event", "event": {"type": "message_start"}}', None),
+        (
+            '{"type": "result", "subtype": "success", "result": "ok"}',
+            {"type": "done", "result": "ok"},
+        ),
+    ],
+)
+def test_parse_event(line: str, expected: dict[str, object] | None) -> None:
+    assert cr.parse_event(line) == expected
+
+
+# --- HTTP API ---
+
+
+def test_static_page_and_headers(client: TestClient) -> None:
+    res = client.get("/")
+    assert res.status_code == 200
+    assert "grana" in res.text
+    assert "frame-ancestors 'none'" in res.headers["content-security-policy"]
+    assert client.get("/app.js").status_code == 200
+    assert client.get("/app.css").status_code == 200
+
+
+def test_api_requires_token(client: TestClient) -> None:
+    assert client.get("/api/me").status_code == 401
+    assert client.post("/api/chat", json={"message": "oi"}).status_code == 401
+    bad = {"Authorization": "Bearer errado"}
+    assert client.post("/api/new", headers=bad).status_code == 401
+
+
+def test_chat_streams_and_resumes(client: TestClient) -> None:
+    h = {"Authorization": f"Bearer {auth.add_user('ana')}"}
+    assert client.get("/api/me", headers=h).json() == {"user": "ana"}
+    first = events(client.post("/api/chat", json={"message": "quanto?"}, headers=h).text)
+    assert {"type": "tool", "name": "spending_summary"} in first
+    assert "".join(str(e["text"]) for e in first if e["type"] == "text") == "Gasto: R$ 10"
+    assert first[-1] == {"type": "done", "result": "Gasto: R$ 10"}
+    second = events(client.post("/api/chat", json={"message": "e agora?"}, headers=h).text)
+    assert second[-1]["result"] == "Gasto: R$ 10 (resume)"
+    assert client.post("/api/new", headers=h).json() == {"ok": True}
+    third = events(client.post("/api/chat", json={"message": "de novo"}, headers=h).text)
+    assert third[-1]["result"] == "Gasto: R$ 10"
+
+
+def test_chat_errors(client: TestClient) -> None:
+    h = {"Authorization": f"Bearer {auth.add_user('ana')}"}
+    assert client.post("/api/chat", json={"message": ""}, headers=h).status_code == 400
+    assert client.post("/api/chat", json={"message": "x" * 3000}, headers=h).status_code == 400
+    assert client.post("/api/chat", content=b"nao json", headers=h).status_code == 400
+    failed = events(client.post("/api/chat", json={"message": "falha"}, headers=h).text)
+    assert failed[-1]["type"] == "error"
+    silent = events(client.post("/api/chat", json={"message": "mudo"}, headers=h).text)
+    assert silent[-1] == {"type": "error", "message": "O assistente encerrou sem responder."}
+
+
+# --- CLI ---
+
+
+def test_cli_web_tokens_and_serve_guards(monkeypatch: pytest.MonkeyPatch) -> None:
+    refused = runner.invoke(cli.app, ["web", "serve", "--host", "0.0.0.0"])
+    assert refused.exit_code == 1 and "Recusado" in refused.output
+    no_users = runner.invoke(cli.app, ["web", "serve"])
+    assert no_users.exit_code == 1 and "token add" in no_users.output
+    added = runner.invoke(cli.app, ["web", "token", "add", "gabi"])
+    assert added.exit_code == 0
+    token = added.output.strip().splitlines()[-1]
+    assert auth.verify(token) == "gabi"
+    assert "gabi" in runner.invoke(cli.app, ["web", "token", "list"]).output
+    assert runner.invoke(cli.app, ["web", "token", "add", "X Y"]).exit_code == 1
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr("uvicorn.run", lambda app, **kw: calls.append(kw))
+    served = runner.invoke(cli.app, ["web", "serve", "--host", "10.0.0.1"])
+    assert served.exit_code == 0, served.output
+    assert calls[0]["host"] == "10.0.0.1"
+    assert runner.invoke(cli.app, ["web", "token", "remove", "gabi"]).exit_code == 0
+    assert runner.invoke(cli.app, ["web", "token", "remove", "gabi"]).exit_code == 1
+    assert "Nenhum" in runner.invoke(cli.app, ["web", "token", "list"]).output

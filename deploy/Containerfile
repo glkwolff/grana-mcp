@@ -1,0 +1,28 @@
+# Chat web do grana-mcp (Fase 6): Claude Code headless + grana-mcp num container rootless.
+# Build (na raiz do repo):  uv build && podman build -f deploy/Containerfile -t grana-web .
+FROM docker.io/library/python:3.12-slim
+
+ARG CLAUDE_CODE_VERSION=2.1.325
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends nodejs npm ca-certificates \
+ && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+ && npm cache clean --force \
+ && apt-get purge -y npm && apt-get autoremove -y \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY dist/grana_mcp-*.whl /tmp/
+RUN pip install --no-cache-dir /tmp/grana_mcp-*.whl && rm /tmp/grana_mcp-*.whl
+
+RUN useradd --create-home --uid 1000 grana
+USER grana
+# /data/config: config.json (itemIds, sem segredos) e web_tokens.json (só hashes)
+# /data/data:   grana.db (o sync roda no host; aqui só leitura + regras de categoria)
+# Nenhuma credencial da Pluggy entra no container.
+ENV GRANA_MCP_HOME=/data \
+    HOME=/home/grana \
+    CLAUDE_CONFIG_DIR=/home/grana/.claude \
+    DISABLE_AUTOUPDATER=1 \
+    DISABLE_TELEMETRY=1
+WORKDIR /home/grana
+EXPOSE 8765
+CMD ["grana-mcp", "web", "serve", "--host", "0.0.0.0", "--allow-any-interface", "--port", "8765"]

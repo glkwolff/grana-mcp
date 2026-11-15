@@ -1,0 +1,29 @@
+# Quadlet (Podman): copie para ~/.config/containers/systemd/ e rode
+#   systemctl --user daemon-reload && systemctl --user start grana-web
+# Troque WG_IP pelo IP do PC na interface do WireGuard (ex.: 10.8.0.1).
+[Unit]
+Description=grana-mcp chat web (Claude Code + MCP grana)
+After=network-online.target
+
+[Container]
+Image=localhost/grana-web:latest
+ContainerName=grana-web
+UserNS=keep-id
+# Só no IP do WireGuard: quem não é peer da VPN não alcança a porta.
+PublishPort=WG_IP:8765:8765
+Volume=%h/.config/grana-mcp:/data/config:Z
+Volume=%h/.local/share/grana-mcp:/data/data:Z
+Volume=grana-claude:/home/grana/.claude:Z
+# Token do Claude gerado com `claude setup-token` e guardado com:
+#   printf '%s' "<token>" | podman secret create grana-claude-token -
+Secret=grana-claude-token,type=env,target=CLAUDE_CODE_OAUTH_TOKEN
+NoNewPrivileges=true
+DropCapability=ALL
+ReadOnly=true
+Tmpfs=/tmp
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

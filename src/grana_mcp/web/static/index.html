@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f1512">
+  <title>grana</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><span class="dot"></span>grana</div>
+    <div class="who" id="who"></div>
+    <button class="ghost" id="new" type="button" title="Nova conversa">Nova</button>
+  </header>
+
+  <main id="log" class="log" aria-live="polite">
+    <section class="empty" id="empty">
+      <h1>O que você quer saber?</h1>
+      <div class="chips">
+        <button type="button" class="chip">Quanto gastamos este mês por categoria?</button>
+        <button type="button" class="chip">Quanto está a fatura do cartão?</button>
+        <button type="button" class="chip">Compare outubro com setembro</button>
+        <button type="button" class="chip">Quais assinaturas a gente paga?</button>
+      </div>
+    </section>
+  </main>
+
+  <form id="ask" class="ask" autocomplete="off">
+    <textarea id="msg" rows="1" maxlength="2000" placeholder="Pergunte sobre os gastos…" required></textarea>
+    <button id="send" type="submit" aria-label="Enviar">➤</button>
+  </form>
+
+  <dialog id="login">
+    <form method="dialog" id="loginForm">
+      <h2>Entrar</h2>
+      <p>Cole o token gerado com <code>grana-mcp web token add &lt;nome&gt;</code>.</p>
+      <input id="token" type="password" autocomplete="current-password" placeholder="token" required>
+      <p class="err" id="loginErr"></p>
+      <button type="submit">Entrar</button>
+    </form>
+  </dialog>
+  <script src="/app.js"></script>
+</body>
+</html>

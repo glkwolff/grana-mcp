@@ -23,7 +23,9 @@ dependencies = [
     "mcp==2.3.0",
     "platformdirs==4.14.5",
     "pydantic==2.14.3",
+    "starlette==1.10.0",
     "typer==0.29.1",
+    "uvicorn==0.54.0",
     "tzdata==2026.1 ; sys_platform == 'win32'",
 ]
 
@@ -61,7 +63,7 @@ target-version = "py312"
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "S"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "S105", "S106"]
+"tests/**" = ["S101", "S104", "S105", "S106"]
 "scripts/**" = ["S603", "S607"]
 
 [tool.mypy]

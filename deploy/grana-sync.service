@@ -1,0 +1,12 @@
+# Sync diário no HOST (as credenciais ficam no keyring do host, nunca no container).
+# Copie este arquivo e o grana-sync.timer para ~/.config/systemd/user/ e rode
+#   systemctl --user daemon-reload && systemctl --user enable --now grana-sync.timer
+[Unit]
+Description=grana-mcp sync (Meu Pluggy -> SQLite local)
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Antes de publicar no PyPI, use o clone do repo:
+#   ExecStart=%h/.local/bin/uv --directory %h/appfinancas run grana-mcp sync
+ExecStart=%h/.local/bin/uvx grana-mcp sync

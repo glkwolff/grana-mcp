@@ -87,6 +87,10 @@ grana-mcp import-csv fatura.csv --profile ana --format nubank-cartao
 
 Formatos de CSV: `nubank-cartao`, `nubank-conta` e `generic` (`date,description,amount`). Reimportar o mesmo arquivo não duplica. **Não importe uma conta que também é sincronizada pela Pluggy**, senão tudo conta duas vezes.
 
+## Chat no celular (opcional)
+
+`grana-mcp web serve` sobe uma página de chat em que o Claude Code responde usando só as ferramentas do grana. Ela foi feita para rodar num container Podman e ser acessada pelo celular via WireGuard, nunca exposta na internet. Veja [docs/web.md](docs/web.md).
+
 ## Software, não serviço
 
 O grana-mcp é **só software**. Não existe versão hospedada: cada pessoa roda na própria máquina, com a própria conta da Pluggy, e os mantenedores não operam nada nem recebem dado nenhum. O que o seu cliente MCP recebe vai para o provedor do LLM que você usa (Anthropic, OpenAI etc.); por isso o padrão é enviar só valores somados.

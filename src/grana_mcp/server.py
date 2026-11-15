@@ -631,6 +631,7 @@ class GranaTools:
                     {
                         "account_id": a["id"],
                         "account": queries.account_label(a["name"], a["number_masked"]),
+                        "owner": sanitize_text(a["owner"]),
                         "closed_bills": closed,
                         "open_bill_estimate": {
                             "closing_date_used": est.closing_date.isoformat()
@@ -781,7 +782,8 @@ def build_server(db_path: Path | None = None, today: Callable[[], date] = today_
         annotations=_RO,
         description="Faturas de cartão: últimas faturas fechadas, estimativa da fatura aberta "
         "(compras desde o fechamento menos antecipações) e parcelas futuras por mês, com "
-        "ressalvas em 'caveats'. account: id ou parte do nome do cartão (opcional).",
+        "ressalvas em 'caveats'. account: id, parte do nome do cartão ou nome do dono "
+        "(opcional). 'owner' diz de quem é cada cartão.",
     )
     def card_bills(account: str | None = None) -> dict[str, Any]:
         return tools.card_bills(account)

@@ -371,10 +371,13 @@ def find_rows(
 
 
 def card_accounts(conn: sqlite3.Connection, account: str | None = None) -> list[sqlite3.Row]:
-    """Credit card accounts; ``account`` filters by id or by a name/number substring."""
+    """Credit card accounts; ``account`` filters by id, name/number or owner substring."""
     rows = conn.execute(
-        "SELECT a.id, a.name, a.number_masked, i.profile_id FROM accounts a "
-        "LEFT JOIN items i ON i.id = a.item_id WHERE a.kind = 'credit_card' ORDER BY a.name, a.id"
+        "SELECT a.id, a.name, a.number_masked, i.profile_id, "
+        "COALESCE(pe.display_name, p.display_name, i.profile_id) AS owner FROM accounts a "
+        "LEFT JOIN items i ON i.id = a.item_id LEFT JOIN people pe ON pe.id = a.owner_person_id "
+        "LEFT JOIN profiles p ON p.id = i.profile_id "
+        "WHERE a.kind = 'credit_card' ORDER BY a.name, a.id"
     ).fetchall()
     if not account:
         return rows
@@ -383,7 +386,7 @@ def card_accounts(conn: sqlite3.Connection, account: str | None = None) -> list[
         r
         for r in rows
         if r["id"] == account.strip()
-        or needle in f"{r['name'] or ''} {r['number_masked'] or ''}".lower()
+        or needle in f"{r['name'] or ''} {r['number_masked'] or ''} {r['owner'] or ''}".lower()
     ]
 
 

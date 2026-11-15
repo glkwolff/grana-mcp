@@ -66,6 +66,13 @@ category_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(category_app, name="category")
+web_app = typer.Typer(
+    help="Chat web pessoal (opcional): Claude Code trancado só com as ferramentas do grana.",
+    no_args_is_help=True,
+)
+app.add_typer(web_app, name="web")
+web_token_app = typer.Typer(help="Tokens de acesso ao chat web.", no_args_is_help=True)
+web_app.add_typer(web_token_app, name="token")
 
 
 def make_client(creds: Credentials) -> PluggyClient:
@@ -695,6 +702,83 @@ def init(
         "Depois, pergunte por exemplo: 'quanto gastamos por categoria no mês passado?'.\n"
         "Para manter os dados atualizados, agende 'grana-mcp sync' 1x por dia (cron/systemd)."
     )
+
+
+# --- web chat (Phase 6) ---
+
+ANY_INTERFACE = {"0.0.0.0", "::", ""}  # noqa: S104 - compared against, never bound by default
+
+
+@web_app.command("serve")
+def web_serve(
+    host: Annotated[str, typer.Option(help="IP onde escutar (ex.: o IP do WireGuard).")] = (
+        "127.0.0.1"
+    ),
+    port: Annotated[int, typer.Option(help="Porta.")] = 8765,
+    model: Annotated[str | None, typer.Option(help="Modelo do Claude (opcional).")] = None,
+    allow_any_interface: Annotated[
+        bool, typer.Option(help="Permite 0.0.0.0 (ex.: dentro de um container).")
+    ] = False,
+) -> None:
+    """Sobe o chat web. Escute só no IP do WireGuard (ou 127.0.0.1); nunca na internet."""
+    from grana_mcp.web import auth
+    from grana_mcp.web.app import create_app
+    from grana_mcp.web.claude_runner import RunnerConfig
+
+    if host in ANY_INTERFACE and not allow_any_interface:
+        typer.echo(
+            "Recusado: escutar em todas as interfaces exporia o chat. Use --host com o IP do "
+            "WireGuard (ou --allow-any-interface dentro de um container).",
+            err=True,
+        )
+        raise typer.Exit(1)
+    if not auth.users():
+        typer.echo("Crie um acesso antes: grana-mcp web token add <nome>", err=True)
+        raise typer.Exit(1)
+    import uvicorn
+
+    typer.echo(f"Chat em http://{host}:{port}  (usuários: {', '.join(auth.users())})")
+    uvicorn.run(
+        create_app(RunnerConfig(model=model)),
+        host=host,
+        port=port,
+        log_level="warning",
+        access_log=False,
+        server_header=False,
+    )
+
+
+@web_token_app.command("add")
+def web_token_add(user: str) -> None:
+    """Cria (ou troca) o token de um usuário. Mostrado uma única vez."""
+    from grana_mcp.web import auth
+
+    try:
+        token = auth.add_user(user)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from None
+    typer.echo(f"Token de '{user.strip().lower()}' (guarde; não será mostrado de novo):")
+    typer.echo(token)
+
+
+@web_token_app.command("list")
+def web_token_list() -> None:
+    """Lista os usuários com acesso."""
+    from grana_mcp.web import auth
+
+    typer.echo("\n".join(auth.users()) or "Nenhum usuário.")
+
+
+@web_token_app.command("remove")
+def web_token_remove(user: str) -> None:
+    """Revoga o acesso de um usuário."""
+    from grana_mcp.web import auth
+
+    if not auth.remove_user(user):
+        typer.echo(f"Usuário '{user}' não existe.", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"Acesso de '{user}' revogado.")
 
 
 @app.command()
