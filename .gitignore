@@ -1,0 +1,33 @@
+# Claude Code (local only)
+.claude/
+CLAUDE.md
+HANDOFF.md
+
+# Python / uv
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Dados financeiros e segredos — nunca commitar
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.duckdb
+*.ofx
+!tests/fixtures/synthetic/*.ofx
+.env
+.env.*
+
+# Editor / SO
+.vscode/
+.idea/
+.DS_Store
