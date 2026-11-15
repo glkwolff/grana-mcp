@@ -19,6 +19,15 @@ import typer
 from grana_mcp import config
 from grana_mcp.config import Credentials, CredentialsNotFoundError, Profile
 from grana_mcp.money import format_brl
+from grana_mcp.pipeline.categorize import (
+    MATCH_TYPES,
+    TAXONOMY,
+    RuleError,
+    add_user_rule,
+    delete_user_rule,
+    list_user_rules,
+    run_categorize,
+)
 from grana_mcp.pipeline.dedupe import DedupeResult, run_dedupe
 from grana_mcp.privacy.documents import parse_document
 from grana_mcp.providers.pluggy import PluggyAuthError, PluggyClient, PluggyError
@@ -43,6 +52,11 @@ household_app = typer.Typer(
     help="Documentos (CPF/CNPJ) da casa, guardados só como hash.", no_args_is_help=True
 )
 app.add_typer(household_app, name="household")
+category_app = typer.Typer(
+    help="Regras de categoria do usuário (têm prioridade sobre as embutidas).",
+    no_args_is_help=True,
+)
+app.add_typer(category_app, name="category")
 
 
 def make_client(creds: Credentials) -> PluggyClient:
@@ -108,6 +122,20 @@ def profile_add(
         )
     config.upsert_profile(Profile(id=pid, display_name=name, item_ids=ids))
     typer.echo(f"Perfil '{pid}' salvo com {len(ids)} item(ns). Rode: grana-mcp sync")
+
+
+def _run_pipeline(conn: sqlite3.Connection) -> None:
+    """Dedupe then categorize (no network); prints a short summary."""
+    _echo_dedupe(run_dedupe(conn))
+    _echo_categorize(conn)
+
+
+def _echo_categorize(conn: sqlite3.Connection) -> None:
+    r = run_categorize(conn)
+    outros = r.by_category.get("Outros", 0)
+    typer.echo(
+        f"categorias: {r.total} transações, {outros} em 'Outros'; {r.changed} alteração(ões)."
+    )
 
 
 def _echo_dedupe(r: DedupeResult) -> None:
@@ -185,7 +213,7 @@ def sync(
         for w in r.warnings:
             typer.echo(f"[{p.id}] aviso: {w}")
     # Dedupe of the whole database, also when a profile failed.
-    _echo_dedupe(run_dedupe(store.conn))
+    _run_pipeline(store.conn)
     store.conn.close()
     if failed:
         raise typer.Exit(1)
@@ -206,7 +234,7 @@ def store_session() -> Iterator[db.Store]:
 def reprocess() -> None:
     """Recalcula a limpeza (fatura, transferência interna, investimento, estorno). Sem rede."""
     with store_session() as store:
-        _echo_dedupe(run_dedupe(store.conn))
+        _run_pipeline(store.conn)
 
 
 # --- people, accounts and household documents ---
@@ -289,7 +317,7 @@ def account_assign(
         people.assign(acc["id"], who["id"])
         store.conn.commit()
         typer.echo(f"Conta {acc['name'] or acc['id']} {acc['number_masked'] or ''} -> {who['id']}")
-        _echo_dedupe(run_dedupe(store.conn))
+        _run_pipeline(store.conn)
 
 
 @household_app.command("add-doc")
@@ -322,7 +350,7 @@ def household_add_doc(
             f"{kind} {'registrado' if new else 'já existia; dono atualizado'} para '{owner}' "
             "(só o hash foi guardado)."
         )
-        _echo_dedupe(run_dedupe(store.conn))
+        _run_pipeline(store.conn)
 
 
 def consent_line(expires_iso: str | None, now: datetime) -> tuple[str, bool]:
@@ -412,6 +440,57 @@ def status() -> None:
                 f"({r['n']} transações)"
             )
     store.conn.close()
+
+
+# --- category rules ---
+
+
+@category_app.command("add")
+def category_add(
+    pattern: str,
+    category: str,
+    match_type: str = typer.Option("contains", help="contains | regex | merchant"),
+    priority: int = typer.Option(0, help="Maior vence entre regras do usuário."),
+) -> None:
+    """Cria uma regra (ex.: grana-mcp category add "padaria do bairro" Mercado) e recategoriza."""
+    if match_type not in MATCH_TYPES:
+        typer.echo("match_type deve ser contains, regex ou merchant.", err=True)
+        raise typer.Exit(1)
+    with store_session() as store:
+        try:
+            rule = add_user_rule(store.conn, pattern, category, match_type, priority)
+        except RuleError as exc:
+            typer.echo(f"Regra inválida: {exc}", err=True)
+            raise typer.Exit(1) from None
+        typer.echo(f"Regra {rule.rule_id}: '{rule.pattern}' ({rule.match_type}) -> {rule.category}")
+        if rule.category not in TAXONOMY:
+            typer.echo("aviso: categoria fora da lista padrão: " + ", ".join(TAXONOMY))
+        _echo_categorize(store.conn)
+
+
+@category_app.command("list")
+def category_list() -> None:
+    """Lista as regras do usuário."""
+    with store_session() as store:
+        rules = list_user_rules(store.conn)
+        if not rules:
+            typer.echo("Nenhuma regra do usuário.")
+        for r in rules:
+            typer.echo(
+                f"{r.rule_id}: '{r.pattern}' ({r.match_type}, prioridade {r.priority})"
+                f" -> {r.category}"
+            )
+
+
+@category_app.command("remove")
+def category_remove(rule_id: int) -> None:
+    """Remove uma regra do usuário pelo id e recategoriza."""
+    with store_session() as store:
+        if not delete_user_rule(store.conn, rule_id):
+            typer.echo(f"Regra {rule_id} não existe.", err=True)
+            raise typer.Exit(1)
+        typer.echo(f"Regra {rule_id} removida.")
+        _echo_categorize(store.conn)
 
 
 @app.command()

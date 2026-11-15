@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -205,21 +206,42 @@ def spending_by(
     return sorted(buckets, key=lambda b: (-b.cents, b.key))
 
 
+_LEGAL_SUFFIX_RE = re.compile(
+    r"\b(ltda|s\.?\s?a\.?|me|epp|eireli|mei|comercio|com|instituicao de pagamento|"
+    r"instituicao de pag|agencia de restaurantes online|tecnologia|brasil)\b\.?",
+    re.IGNORECASE,
+)
+_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+
+
+def merchant_group_key(label: str) -> str:
+    """Grouping key so "99 FOOD LTDA", "99Food" and "99 FOOD" are one merchant."""
+    folded = unicodedata.normalize("NFKD", label).encode("ascii", "ignore").decode().casefold()
+    folded = _LEGAL_SUFFIX_RE.sub(" ", folded)
+    return _NON_ALNUM_RE.sub("", folded) or folded
+
+
 def _spending_by_merchant(
     conn: sqlite3.Connection, where: str, params: list[object]
 ) -> list[Bucket]:
     household = household_hashes(conn)
     totals: dict[str, list[int]] = {}
+    labels: dict[str, str] = {}
     for row in conn.execute(
         "SELECT t.amount_cents, t.merchant, t.description_clean, t.description_raw, "  # noqa: S608
         "t.counterpart_doc_hash, t.counterpart_doc_type, t.operation_type "
         f"FROM {TX_FROM} WHERE {where}",
         params,
     ):
-        acc = totals.setdefault(merchant_label(row, household), [0, 0])
+        label = merchant_label(row, household)
+        key = label if label == PERSON_LABEL else merchant_group_key(label)
+        # Display the shortest variant ("99FOOD" rather than "99 FOOD LTDA").
+        if key not in labels or len(label) < len(labels[key]):
+            labels[key] = label
+        acc = totals.setdefault(key, [0, 0])
         acc[0] -= row["amount_cents"]
         acc[1] += 1
-    buckets = [Bucket(k, v[0], v[1]) for k, v in totals.items()]
+    buckets = [Bucket(labels[k], v[0], v[1]) for k, v in totals.items()]
     return sorted(buckets, key=lambda b: (-b.cents, b.key))
 
 

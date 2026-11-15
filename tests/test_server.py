@@ -310,6 +310,7 @@ def test_card_bills(conn: sqlite3.Connection) -> None:
         "INSERT INTO bills (id, account_id, due_date, closing_date, total_cents, synced_at) "
         "VALUES ('b1', 'card', '2026-11-10', '2026-11-03', 100000, 'x');"
         "INSERT INTO bill_payments VALUES ('b1', 0, '2026-11-09', 100000, 'FULL_PAYMENT', 'PIX');"
+        "INSERT INTO bill_payments VALUES ('b1', 1, '2026-11-12', 5000, 'OTHER', 'PIX');"
     )
     add_tx(conn, "2026-11-03", -50_00, account="card", profile="bia")
     add_tx(conn, "2026-11-09", 1000_00, "PAGAMENTO", account="card", profile="bia",
@@ -324,6 +325,7 @@ def test_card_bills(conn: sqlite3.Connection) -> None:
     assert card["account"] == "Cartao Sintetico ****0002"
     assert card["closed_bills"][0]["total"]["cents"] == 100000
     assert card["closed_bills"][0]["paid"]["cents"] == 100000
+    assert card["closed_bills"][0]["early_payments_next_bill"]["cents"] == 5000
     est = card["open_bill_estimate"]
     assert est["closing_date_used"] == "2026-11-03"
     assert est["purchases"]["cents"] == 50_00
@@ -361,10 +363,14 @@ def test_mcp_registration(conn: sqlite3.Connection) -> None:
         "find_transactions",
         "card_bills",
         "excluded_items",
+        "recurring_charges",
+        "set_category_rule",
     }
     assert not any("sync" in n for n in names)
     for t in listed:
-        assert t.annotations is not None and t.annotations.read_only_hint is True
+        assert t.annotations is not None
+        # set_category_rule is the only tool that writes (local rules table only).
+        assert t.annotations.read_only_hint is (t.name != "set_category_rule")
     for name in ("spending_summary", "top_merchants", "find_transactions", "excluded_items"):
         desc = next(t.description for t in listed if t.name == name) or ""
         assert "NÃO confiáveis" in desc
@@ -497,3 +503,42 @@ def test_excluded_items_caps_rows(conn: sqlite3.Connection) -> None:
     out = tools().excluded_items("2026-10")
     assert len(out["rows"]) == MAX_ROWS and out["truncated"]
     assert out["by_reason"][0]["count"] == 60
+
+
+# --- Phase 4: recurring charges and user category rules ---
+
+
+def test_recurring_charges_tool(conn: sqlite3.Connection) -> None:
+    for month in ("2026-08", "2026-09", "2026-10", "2026-11"):
+        add_tx(conn, f"{month}-10", -2390, "EBW*Streaming Sintetico", category="Music streaming")
+    add_tx(conn, "2026-03-01", -999, "ANTIGO SINTETICO")
+    conn.commit()
+    from grana_mcp.pipeline.categorize import run_categorize
+
+    run_categorize(conn)
+    out = tools().recurring_charges()
+    assert out["count"] == 1
+    item = out["items"][0]
+    assert item["monthly"]["cents"] == 2390
+    assert item["occurrences"] == 4
+    assert item["category"] == "Assinaturas"
+    assert item["active"] is True
+    assert out["active_monthly_total"]["cents"] == 2390
+    assert "1 cobrança" in out["summary"]
+
+
+def test_set_category_rule_tool(conn: sqlite3.Connection) -> None:
+    add_tx(conn, "2026-10-05", -1500, "LOJA MISTERIOSA SINTETICA", category="Services")
+    conn.commit()
+    out = tools().set_category_rule("loja misteriosa", "Pets")
+    assert out["rule"]["category"] == "Pets"
+    assert out["recategorized"] == 1
+    assert out["category_in_taxonomy"] is True
+    cat = tools().spending_summary(period="2026-10", group_by="category")
+    assert cat["items"][0]["key"] == "Pets"
+    custom = tools().set_category_rule("misteriosa", "Hobby", "contains")
+    assert custom["category_in_taxonomy"] is False
+    with pytest.raises(ToolError):
+        tools().set_category_rule("ab", "Pets")
+    with pytest.raises(ToolError):
+        tools().set_category_rule("(", "Pets", "regex")

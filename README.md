@@ -29,7 +29,7 @@ claude mcp add grana -- uv --directory /caminho/para/grana-mcp run grana-mcp ser
 
 Use `--scope user` para valer em todos os projetos. O servidor só lê o SQLite local e não acessa a rede; o `sync` continua sendo pela linha de comando (dá para agendar no cron).
 
-Ferramentas: `status` (conexões, pessoas e dono de cada conta), `spending_summary` (por categoria, estabelecimento, pessoa, perfil ou conta), `compare_periods`, `top_merchants`, `find_transactions` (no máximo 50 linhas, com nomes de pessoas físicas mascarados), `excluded_items` (o que ficou fora do gasto e por quê) e `card_bills` (faturas fechadas e estimativa da fatura aberta). Prompt: `relatorio_mensal`.
+Ferramentas: `status` (conexões, pessoas e dono de cada conta), `spending_summary` (por categoria, estabelecimento, pessoa, perfil ou conta), `compare_periods`, `top_merchants`, `find_transactions` (no máximo 50 linhas, com nomes de pessoas físicas mascarados), `excluded_items` (o que ficou fora do gasto e por quê), `card_bills` (faturas fechadas e estimativa da fatura aberta), `recurring_charges` (assinaturas detectadas) e `set_category_rule` (corrige uma categoria; é a única ferramenta que grava algo, e só no banco local). Prompt: `relatorio_mensal`.
 
 ### Casal ou família
 
@@ -42,6 +42,20 @@ grana-mcp account assign 0001 ana        # id da conta ou final do número
 grana-mcp household add-doc ana          # pede o CPF/CNPJ sem mostrar na tela
 grana-mcp reprocess                      # recalcula a limpeza, sem rede
 ```
+
+### Categorias
+
+As transações são categorizadas sem LLM, nesta ordem: regras suas → regras embutidas para estabelecimentos brasileiros (`src/grana_mcp/rules/categories_br.toml`) → categoria da Pluggy traduzida → "Outros". Para corrigir:
+
+```bash
+grana-mcp category add "padaria do bairro" Mercado   # palavras inteiras; "uber*" = prefixo
+grana-mcp category list
+grana-mcp category remove 3
+```
+
+Ou peça ao seu cliente MCP ("coloca a padaria do bairro em Mercado"), que usa `set_category_rule`.
+
+### Limpeza
 
 A cada `sync` (e no `reprocess`), a limpeza tira do gasto: pagamento de fatura de cartão sincronizado, transferências entre contas/pessoas da casa, aplicações e resgates de investimento e pares compra/estorno. Sem pessoas cadastradas, cada perfil conta como uma pessoa. O `sync` também lê o CPF/CNPJ do titular de cada conexão (`GET /identity`) e guarda só o hash; use `--no-identity` para desligar.
 

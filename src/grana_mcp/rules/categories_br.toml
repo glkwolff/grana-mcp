@@ -1,0 +1,174 @@
+# Regras embutidas de categorização para estabelecimentos e serviços brasileiros.
+#
+# Como funciona (ver pipeline/categorize.py):
+# - O texto da transação (descrição + estabelecimento) é normalizado: minúsculas,
+#   sem acento, tudo que não é letra/dígito vira espaço.
+# - Cada padrão também é normalizado e casa com PALAVRAS INTEIRAS. Um "*" no fim
+#   casa só o início da palavra ("uber*" casa "dl uberrides"; "raia*" casa "raia2153").
+# - Vence a PRIMEIRA regra que casar, na ordem deste arquivo. Por isso
+#   Delivery vem antes de Transporte ("99food" antes de "99app").
+# - Regras do usuário (set_category_rule) têm prioridade sobre estas.
+#
+# Só nomes de empresas/serviços públicos e genéricos. Nunca nomes de pessoas.
+
+[[rule]]
+category = "Delivery"
+patterns = [
+  "ifood", "ifd", "ifood com agencia", "99food", "99 food", "rappi", "ze delivery",
+  "zé delivery", "aiqfome", "james delivery", "delivery much", "uber eats", "keeta",
+  "lalamove",
+]
+
+[[rule]]
+category = "Transporte"
+patterns = [
+  "uber*", "99app", "99 tecnologia", "99 taxi", "99pop", "nupay 99",
+  "cabify", "indrive", "in driver", "blablacar", "metro sp", "metro rio", "sptrans",
+  "bilhete unico", "urbs", "cartao transporte", "riocard", "bom vtu", "top sp",
+  "clickbus", "buser", "patinete", "jet scooter", "tembici",
+  "estacionamento", "estapar", "zona azul", "sem parar", "conectcar", "veloe",
+  "taggy", "pedagio", "ecovias", "ccr rodovias",
+]
+
+[[rule]]
+category = "Combustível"
+patterns = [
+  "posto", "auto posto", "ipiranga", "shell", "petrobras", "br mania", "ale combustiveis",
+  "raizen", "vibra energia", "combustivel", "abastece ai",
+]
+
+[[rule]]
+category = "Mercado"
+patterns = [
+  "supermercado", "mercado", "mercearia", "hortifruti", "sacolao", "atacadao", "assai",
+  "carrefour", "pao de acucar", "extra hiper", "condor", "festval", "muffato",
+  "angeloni", "dia brasil", "big bompreco", "bompreco",
+  "sams club", "makro", "tenda atacado", "fort atacadista", "comper", "savegnago",
+  "zaffari", "bistek", "giassi", "st marche", "oba hortifruti", "natural da terra",
+  "mateus supermercados", "guanabara", "prezunic",
+  "mundial", "hirota", "nagumo", "sonda", "covabra", "gbarbosa", "emporio", "acougue",
+  "padaria", "panificadora", "paes e", "frios", "laticinios", "hiper", "minimercado",
+  "conveniencia", "oxxo", "daki", "shopper",
+]
+
+[[rule]]
+category = "Farmácia"
+patterns = [
+  "drogasil", "raia*", "drogasil*", "drogaria", "farmacia", "pague menos", "panvel", "pacheco",
+  "drogao", "nissei", "sao lourenco", "ultrafarma", "onofre", "extrafarma",
+  "venancio", "araujo drog", "farmais", "drogal",
+]
+
+[[rule]]
+category = "Saúde"
+patterns = [
+  "hospital", "clinica", "consultorio", "laboratorio", "fleury", "dasa",
+  "lavoisier", "a+ medicina", "hermes pardini", "sabin", "unimed", "amil",
+  "bradesco saude", "sulamerica", "hapvida", "notredame", "odonto*", "dentista",
+  "psicolog*", "fisioterap*", "nutricion*", "academia", "smart fit", "smartfit",
+  "bluefit", "bodytech", "selfit", "gympass", "wellhub", "totalpass", "otica",
+  "oticas",
+]
+
+[[rule]]
+category = "Moradia"
+patterns = [
+  "imoveis", "imobiliaria", "aluguel", "condominio", "quintoandar", "quinto andar",
+  "leroy merlin", "telhanorte", "madeiramadeira", "tok stok",
+  "tokstok", "etna", "camicado", "casa e construcao", "material de construcao",
+  "ferragens", "ultragaz", "liquigas", "supergasbras", "copagaz",
+]
+
+[[rule]]
+category = "Contas"
+patterns = [
+  "copel", "enel", "cemig", "cpfl", "light sa", "celesc", "coelba", "neoenergia",
+  "equatorial", "energisa", "rge sul", "sabesp", "sanepar", "cedae", "copasa",
+  "embasa", "compesa", "casan", "corsan", "aguas do", "vivo", "telefonica", "claro",
+  "tim celular", "tim s a", "oi s a", "algar", "net servicos", "sky brasil",
+  "desktop", "brisanet", "ligga", "copel telecom", "giga mais", "starlink",
+]
+
+[[rule]]
+category = "Assinaturas"
+patterns = [
+  "spotify", "netflix", "disney", "hbo", "max com", "globoplay", "prime video",
+  "amazon prime", "amazonprime", "apple com bill", "apple com", "itunes", "icloud",
+  "google storage", "google one", "youtube premium", "youtube", "deezer", "paramount",
+  "crunchyroll", "star plus", "telecine", "mubi", "chatgpt", "openai", "anthropic",
+  "claude ai", "microsoft", "xbox", "playstation", "psn", "nintendo", "steam",
+  "adobe", "canva", "dropbox", "notion", "duolingo", "kindle unlimited", "audible",
+  "ubook", "skeelo", "nubank ultravioleta", "ultravioleta",
+]
+
+[[rule]]
+category = "Restaurantes"
+patterns = [
+  "restaurante", "lanchonete", "lanches", "pizzaria", "hamburgueria",
+  "burger king", "mcdonalds", "mc donalds", "bobs", "subway", "habibs", "outback",
+  "madero", "coco bambu", "spoleto", "giraffas", "china in box", "starbucks",
+  "cafe", "cafeteria", "bar", "boteco", "choperia", "cervejaria", "churrascaria",
+  "sushi", "temakeria", "sorveteria", "gelateria", "acai", "doceria",
+  "confeitaria",
+]
+
+[[rule]]
+category = "Educação"
+patterns = [
+  "escola", "colegio", "faculdade", "universidade", "unopar",
+  "anhanguera", "estacio", "unip", "kroton", "curso", "alura", "udemy", "coursera",
+  "rocketseat", "descomplica", "livraria", "saraiva", "cultura livr", "amazon br",
+]
+
+[[rule]]
+category = "Pets"
+patterns = [
+  "petz", "cobasi", "petlove", "pet shop", "petshop", "veterinar*", "agropet",
+  "racao",
+]
+
+[[rule]]
+category = "Viagem"
+patterns = [
+  "latam", "gol linhas", "azul linhas", "voeazul", "decolar", "booking", "airbnb",
+  "hotel", "pousada", "hostel", "cvc", "123milhas", "maxmilhas", "smiles",
+  "localiza", "movida", "unidas", "rodoviaria",
+]
+
+[[rule]]
+category = "Lazer"
+patterns = [
+  "cinema", "cinemark", "cinepolis", "ingresso", "sympla", "eventim",
+  "ticketmaster", "ingresso com", "teatro", "parque", "museu", "boliche",
+  "kart", "clube",
+]
+
+[[rule]]
+category = "Vestuário"
+patterns = [
+  "riachuelo", "renner", "c a modas", "cea", "marisa", "zara", "hering", "cotton on",
+  "centauro", "netshoes", "decathlon", "nike", "adidas", "arezzo", "havaianas",
+  "shein", "reserva", "youcom", "brecho", "calcados",
+]
+
+[[rule]]
+category = "Compras"
+patterns = [
+  "amazon", "amazonmktplc", "mercadolivre", "mercado livre", "mercadopago",
+  "shopee", "shpp brasil", "aliexpress", "magalu", "magazine luiza", "americanas",
+  "casas bahia", "ponto frio", "kabum", "fast shop", "havan", "lojas americanas",
+  "temu", "nuvemshop", "nuvem pa", "daiso", "le biscuit", "miniso",
+]
+
+[[rule]]
+category = "Impostos e taxas"
+patterns = [
+  "iof", "darf", "das simples", "ipva", "iptu", "detran", "multa", "receita federal",
+  "tarifa", "anuidade", "taxa de", "juros", "encargos", "cartorio", "dpvat",
+]
+
+[[rule]]
+category = "Empréstimos"
+patterns = [
+  "midway", "emprestimo", "financiamento", "consignado", "crefisa", "creditas",
+]
