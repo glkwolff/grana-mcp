@@ -1,6 +1,7 @@
 # Quadlet (Podman): copie para ~/.config/containers/systemd/ e rode
 #   systemctl --user daemon-reload && systemctl --user start grana-web
-# Troque WG_IP pelo IP do PC na interface do WireGuard (ex.: 10.8.0.1).
+# Troque LISTEN_IP pelo IP do PC na VPN: Tailscale (`tailscale ip -4`, ex.: 100.x.y.z)
+# ou WireGuard (ex.: 10.8.0.1).
 [Unit]
 Description=grana-mcp chat web (Claude Code + MCP grana)
 After=network-online.target
@@ -9,11 +10,15 @@ After=network-online.target
 Image=localhost/grana-web:latest
 ContainerName=grana-web
 UserNS=keep-id
-# Só no IP do WireGuard: quem não é peer da VPN não alcança a porta.
-PublishPort=WG_IP:8765:8765
+# Só no IP da VPN: quem não está na VPN não alcança a porta.
+PublishPort=LISTEN_IP:8765:8765
 Volume=%h/.config/grana-mcp:/data/config:ro,Z
 Volume=%h/.local/share/grana-mcp:/data/data:Z
 Volume=grana-claude:/home/grana/.claude:Z
+# Login pela conta do Tailscale (`tailscale whois`): CLI e socket do tailscaled do host.
+# Remova estas duas linhas se usar WireGuard + tokens.
+Volume=/usr/bin/tailscale:/usr/bin/tailscale:ro
+Volume=/var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock
 # Token do Claude gerado com `claude setup-token` e guardado com:
 #   printf '%s' "<token>" | podman secret create grana-claude-token -
 Secret=grana-claude-token,type=env,target=CLAUDE_CODE_OAUTH_TOKEN

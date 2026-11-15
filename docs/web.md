@@ -50,7 +50,7 @@ printf '%s' "<token>" | podman secret create grana-claude-token -
 
 ```bash
 mkdir -p ~/.config/containers/systemd
-sed "s/WG_IP/10.8.0.1/" deploy/grana-web.container > ~/.config/containers/systemd/grana-web.container
+sed "s/LISTEN_IP/$(tailscale ip -4)/" deploy/grana-web.container > ~/.config/containers/systemd/grana-web.container
 systemctl --user daemon-reload
 systemctl --user start grana-web
 loginctl enable-linger "$USER"     # sobe mesmo sem você logado
