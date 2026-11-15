@@ -6,6 +6,7 @@ Only these HTTP calls exist in this module, on purpose:
 * ``GET  /items/{id}``        item status and ``consentExpiresAt``
 * ``GET  /accounts?itemId=``  accounts of an item
 * ``GET  /v2/transactions``   transactions of an account, cursor pagination
+* ``GET  /bills?accountId=``  closed credit card bills of an account, page pagination
 
 There is no code for payments, Pix, transfers, connect tokens, item
 update/refresh/delete or anything else that writes. See CLAUDE.md, rule 1.
@@ -31,7 +32,14 @@ from pydantic import BaseModel, ConfigDict
 
 from grana_mcp import __version__
 from grana_mcp.money import to_cents
-from grana_mcp.providers.base import Account, AccountKind, Item, Transaction
+from grana_mcp.providers.base import (
+    Account,
+    AccountKind,
+    Bill,
+    BillPayment,
+    Item,
+    Transaction,
+)
 
 log = logging.getLogger(__name__)
 
@@ -43,6 +51,8 @@ API_KEY_TTL_SECONDS = 2 * 60 * 60
 API_KEY_RENEW_MARGIN_SECONDS = 10 * 60
 MAX_RATE_LIMIT_RETRIES = 3
 TRANSACTIONS_PATH = "/v2/transactions"
+BILLS_PAGE_SIZE = 500  # documented maximum (OpenAPI, GET /bills)
+MAX_BILL_PAGES = 20
 
 
 class PluggyError(Exception):
@@ -130,6 +140,24 @@ class _RawTransaction(_Raw):
     merchant: _RawMerchant | None = None
 
 
+class _RawBillPayment(_Raw):
+    paymentDate: str | None = None
+    amount: Decimal
+    valueType: str | None = None
+    paymentMode: str | None = None
+
+
+class _RawBill(_Raw):
+    id: str
+    dueDate: str
+    billClosingDate: str | None = None
+    totalAmount: Decimal
+    totalAmountCurrencyCode: str | None = None
+    minimumPaymentAmount: Decimal | None = None
+    allowsInstallments: bool | None = None
+    payments: list[_RawBillPayment] | None = None
+
+
 # --- Normalization (pure functions, unit-tested) ---
 
 
@@ -205,6 +233,41 @@ def posted_date(value: str) -> date:
     if (utc.hour, utc.minute, utc.second, utc.microsecond) == (0, 0, 0, 0):
         return utc.date()
     return utc.astimezone(SAO_PAULO).date()
+
+
+def calendar_date(value: str) -> date:
+    """Date part of a bill date, kept as-is (no timezone conversion).
+
+    Bill dates are calendar dates pinned to midnight (``2026-11-01T00:00:00.000Z``
+    observed; ``2023-07-20T00:00:00`` in the OpenAPI examples), so the first 10
+    characters are the date.
+    """
+    return date.fromisoformat(value[:10])
+
+
+def normalize_bill(raw: _RawBill, account_id: str) -> Bill:
+    payments = tuple(
+        BillPayment(
+            payment_date=calendar_date(p.paymentDate) if p.paymentDate else None,
+            amount_cents=to_cents(abs(p.amount)),
+            value_type=p.valueType,
+            payment_mode=p.paymentMode,
+        )
+        for p in raw.payments or []
+    )
+    return Bill(
+        id=raw.id,
+        account_id=account_id,
+        due_date=calendar_date(raw.dueDate),
+        closing_date=calendar_date(raw.billClosingDate) if raw.billClosingDate else None,
+        total_cents=to_cents(raw.totalAmount),
+        currency=raw.totalAmountCurrencyCode or "BRL",
+        minimum_payment_cents=(
+            to_cents(raw.minimumPaymentAmount) if raw.minimumPaymentAmount is not None else None
+        ),
+        allows_installments=raw.allowsInstallments,
+        payments=payments,
+    )
 
 
 def document_digits(doc: _RawDocument | str | None) -> str | None:
@@ -432,6 +495,34 @@ class PluggyClient:
                 raise PluggyError("Pluggy repeated a pagination cursor; stopping")
             seen.add(url)
         log.info("account %s: %d transactions in %d pages", account.id, total, pages)
+
+    def list_bills(self, account: Account) -> list[Bill]:
+        """Closed bills of a credit card account (``GET /bills``, page pagination).
+
+        Only closed bills exist in this endpoint; the open bill is estimated
+        locally from transactions (``analytics/card_bill.py``).
+        """
+        bills: list[Bill] = []
+        page = 1
+        while True:
+            body = self._get(
+                "/bills",
+                params={
+                    "accountId": account.id,
+                    "pageSize": str(BILLS_PAGE_SIZE),
+                    "page": str(page),
+                },
+            )
+            if not isinstance(body, dict):
+                raise PluggyError("unexpected /bills response shape")
+            for r in body.get("results") or []:
+                bills.append(normalize_bill(_RawBill.model_validate(r), account.id))
+            total_pages = int(body.get("totalPages") or 1)
+            if page >= total_pages or page >= MAX_BILL_PAGES:
+                break
+            page += 1
+        log.info("account %s: %d bills", account.id, len(bills))
+        return bills
 
     def _next_url(self, nxt: str) -> str:
         """``next`` is a query string to append to the path as-is (docs: Basic concepts)."""

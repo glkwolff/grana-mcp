@@ -12,6 +12,25 @@ Servidor MCP **open source, auto-hospedado e somente leitura** para finanças pe
 - **Privacidade em primeiro lugar:** as transações ficam num SQLite no seu computador, e o LLM recebe só totais por padrão.
 - **Outra fonte de dados:** dá para importar OFX/CSV sem usar a Pluggy.
 
+## Uso (em desenvolvimento)
+
+Ainda não está no PyPI. A partir de um clone do repositório:
+
+```bash
+uv --directory /caminho/para/grana-mcp run grana-mcp profile add   # credenciais da Pluggy + itemIds
+uv --directory /caminho/para/grana-mcp run grana-mcp sync          # baixa os dados para o SQLite local
+```
+
+Para adicionar o servidor MCP (stdio) no Claude Code:
+
+```bash
+claude mcp add grana -- uv --directory /caminho/para/grana-mcp run grana-mcp serve
+```
+
+Use `--scope user` para valer em todos os projetos. O servidor só lê o SQLite local e não acessa a rede; o `sync` continua sendo pela linha de comando (dá para agendar no cron).
+
+Ferramentas: `status`, `spending_summary`, `compare_periods`, `top_merchants`, `find_transactions` (no máximo 50 linhas, com nomes de pessoas físicas mascarados) e `card_bills` (faturas fechadas e estimativa da fatura aberta). Prompt: `relatorio_mensal`.
+
 ## Software, não serviço
 
 Este projeto é **só software**. Não existe versão hospedada. Cada pessoa roda o servidor na própria máquina, com a própria conta da Pluggy. Os mantenedores não operam nada e não recebem nenhum dado de ninguém.

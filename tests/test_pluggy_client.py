@@ -166,10 +166,11 @@ def test_client_exposes_no_write_methods() -> None:
         "list_items",
         "list_accounts",
         "list_transactions",
+        "list_bills",
     }
 
 
-ALLOWED_PATH_PREFIXES = ("/auth", "/items/", "/accounts", "/v2/transactions")
+ALLOWED_PATH_PREFIXES = ("/auth", "/items/", "/accounts", "/v2/transactions", "/bills")
 
 
 def test_module_mentions_only_read_endpoints() -> None:

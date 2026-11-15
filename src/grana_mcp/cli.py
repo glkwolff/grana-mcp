@@ -1,4 +1,4 @@
-"""Command line: ``grana-mcp profile add``, ``grana-mcp sync``, ``grana-mcp status``.
+"""Command line: ``grana-mcp profile add``, ``sync``, ``status`` and ``serve``.
 
 Never prints secrets. Output is PT-BR.
 """
@@ -129,7 +129,8 @@ def sync(
             continue
         typer.echo(
             f"[{p.id}] ok: {r.items} item(ns), {r.accounts} conta(s), {r.fetched} transações "
-            f"lidas; {r.new} novas, {r.updated} atualizadas, {r.deleted} removidas."
+            f"lidas; {r.new} novas, {r.updated} atualizadas, {r.deleted} removidas; "
+            f"faturas fechadas: {r.bills_new} novas, {r.bills_updated} atualizadas."
         )
         if r.sign_mismatches:
             typer.echo(
@@ -223,3 +224,11 @@ def status() -> None:
                 f"({r['n']} transações)"
             )
     store.conn.close()
+
+
+@app.command()
+def serve() -> None:
+    """Servidor MCP por stdio (é o que o cliente MCP executa). Só lê o SQLite local."""
+    from grana_mcp.server import run  # imported lazily: the MCP SDK is heavy
+
+    run()

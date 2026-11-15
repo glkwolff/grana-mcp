@@ -1,0 +1,37 @@
+{
+  "page": 1,
+  "total": 2,
+  "totalPages": 1,
+  "results": [
+    {
+      "id": "55555555-5555-4555-8555-000000000002",
+      "dueDate": "2026-10-10T00:00:00.000Z",
+      "billClosingDate": "2026-10-03T00:00:00.000Z",
+      "totalAmount": 1234.5650,
+      "totalAmountCurrencyCode": "BRL",
+      "minimumPaymentAmount": 185.1833,
+      "allowsInstallments": true,
+      "financeCharges": [
+        {"id": "66666666-6666-4666-8666-000000000001", "type": "IOF", "amount": 1.23, "currencyCode": "BRL"}
+      ],
+      "payments": [
+        {"id": "77777777-7777-4777-8777-000000000001", "valueType": "FULL_PAYMENT", "paymentDate": "2026-10-10T00:00:00.000Z", "paymentMode": "DEBIT_ACCOUNT", "amount": 1234.5650, "currencyCode": "BRL"}
+      ],
+      "createdAt": "2026-10-04T06:00:00.000Z",
+      "updatedAt": "2026-10-11T06:00:00.000Z"
+    },
+    {
+      "id": "55555555-5555-4555-8555-000000000001",
+      "dueDate": "2026-09-10T00:00:00.000Z",
+      "billClosingDate": null,
+      "totalAmount": 99.9949,
+      "totalAmountCurrencyCode": "BRL",
+      "minimumPaymentAmount": null,
+      "allowsInstallments": false,
+      "financeCharges": [],
+      "payments": [],
+      "createdAt": "2026-09-04T06:00:00.000Z",
+      "updatedAt": "2026-09-04T06:00:00.000Z"
+    }
+  ]
+}

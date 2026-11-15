@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 
 from grana_mcp.config import Profile
-from grana_mcp.providers.base import Provider
+from grana_mcp.providers.base import Account, Provider
 from grana_mcp.providers.pluggy import SAO_PAULO, PluggyError
 from grana_mcp.store.db import Store
 
@@ -29,11 +29,27 @@ class SyncResult:
     updated: int = 0
     deleted: int = 0
     sign_mismatches: int = 0
+    bills_new: int = 0
+    bills_updated: int = 0
     warnings: list[str] = field(default_factory=list)
 
 
 def today_sp() -> date:
     return datetime.now(SAO_PAULO).date()
+
+
+def _sync_bills(store: Store, provider: Provider, account: Account, result: SyncResult) -> None:
+    """Closed bills are optional: a connector without the product must not fail the sync."""
+    try:
+        bills = provider.list_bills(account)
+    except PluggyError as exc:
+        if exc.status in (401, 403, 429) or exc.status is None or exc.status >= 500:
+            raise
+        result.warnings.append(f"account {account.id}: bills unavailable ({exc.status})")
+        return
+    counts = store.upsert_bills(bills)
+    result.bills_new += counts.new
+    result.bills_updated += counts.updated
 
 
 def sync_profile(
@@ -78,6 +94,8 @@ def sync_profile(
                         f"account {account.id}: Pluggy returned no transactions; "
                         "kept the local ones"
                     )
+                if account.kind == "credit_card":
+                    _sync_bills(store, provider, account, result)
             store.mark_item_synced(item_id)
             store.conn.commit()
             log.info("item %s synced", item_id)

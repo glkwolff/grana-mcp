@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import os
+import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 
 import keyring
 import keyring.backend
 import pytest
+
+# Safety net: even if a test reverts the per-test GRANA_MCP_HOME (e.g. with
+# monkeypatch.undo()), paths fall back to a throwaway directory, never to the
+# user's real config/data directories.
+os.environ["GRANA_MCP_HOME"] = tempfile.mkdtemp(prefix="grana-mcp-tests-")
 
 
 class MemoryKeyring(keyring.backend.KeyringBackend):

@@ -2,7 +2,8 @@
 
 Response shapes follow the documented API (OpenAPI at docs.pluggy.ai):
 ``POST /auth``, ``GET /items/{id}``, ``GET /accounts?itemId=``,
-``GET /v2/transactions?accountId=`` with ``next`` cursor query strings.
+``GET /v2/transactions?accountId=`` with ``next`` cursor query strings,
+``GET /bills?accountId=`` with ``page``/``totalPages``.
 """
 
 from __future__ import annotations
@@ -44,6 +45,11 @@ class FakePluggy:
             CARD_ID: {"": load("transactions_card.json")},
         }
     )
+    # accountId -> list of pages (page 1 first)
+    bills: dict[str, list[dict[str, Any]]] = field(
+        default_factory=lambda: {CARD_ID: [load("bills_card.json")]}
+    )
+    bills_status: int = 200
     requests: list[httpx.Request] = field(default_factory=list)
     issued_keys: list[str] = field(default_factory=list)
     expired_keys: set[str] = field(default_factory=set)
@@ -98,6 +104,22 @@ class FakePluggy:
             # Serve the raw text so decimals reach the client exactly as written.
             return httpx.Response(
                 200, content=json.dumps(page).encode(), headers={"content-type": "application/json"}
+            )
+        if path == "/bills":
+            if self.bills_status != 200:
+                return httpx.Response(
+                    self.bills_status, json={"code": self.bills_status, "message": "x"}
+                )
+            pages = self.bills.get(request.url.params.get("accountId", ""), [])
+            index = int(request.url.params.get("page", "1")) - 1
+            if index >= len(pages):
+                return httpx.Response(
+                    200, json={"page": index + 1, "total": 0, "totalPages": 0, "results": []}
+                )
+            return httpx.Response(
+                200,
+                content=json.dumps(pages[index]).encode(),
+                headers={"content-type": "application/json"},
             )
         return httpx.Response(404, json={"code": 404, "message": "not found"})
 

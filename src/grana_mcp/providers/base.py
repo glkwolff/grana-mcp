@@ -60,6 +60,34 @@ class Transaction:
     sign_mismatch: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class BillPayment:
+    """A payment recorded on a closed bill. ``amount_cents`` is positive."""
+
+    payment_date: date | None
+    amount_cents: int
+    value_type: str | None
+    payment_mode: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class Bill:
+    """A closed credit card bill (fatura). Amounts are positive cents.
+
+    Dates are calendar dates as sent by the provider (no timezone conversion).
+    """
+
+    id: str
+    account_id: str
+    due_date: date
+    closing_date: date | None
+    total_cents: int
+    currency: str
+    minimum_payment_cents: int | None
+    allows_installments: bool | None
+    payments: tuple[BillPayment, ...] = ()
+
+
 class Provider(Protocol):
     """Read-only access to one data source."""
 
@@ -72,3 +100,5 @@ class Provider(Protocol):
     def list_transactions(
         self, account: Account, date_from: date, date_to: date | None = None
     ) -> Iterator[Transaction]: ...
+
+    def list_bills(self, account: Account) -> list[Bill]: ...

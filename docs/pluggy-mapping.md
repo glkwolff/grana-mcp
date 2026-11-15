@@ -14,6 +14,8 @@ Fontes (consultadas em 15/11/2026):
 - **[PD]** Cobertura de Payment Data: https://docs.pluggy.ai/en/docs/open-finance/payment-data.md
 - **[CAT]** Categorização: https://docs.pluggy.ai/en/docs/products/transaction-categorization.md
 - **[RL]** Rate limits: https://docs.pluggy.ai/en/docs/reference/rate-limits.md
+- **[BILL]** Credit Card Bills: https://docs.pluggy.ai/en/docs/products/credit-card-bills.md (consultado em 15/11/2026; schemas `Bill`, `BillPayment` e `BillFinanceCharge` e o endpoint `GET /bills` na [OAS])
+- **[REAL]** Formato observado numa resposta real de `GET /bills` (só as chaves e o formato das datas/valores; nenhum valor real foi guardado no repositório)
 - **[BP]** Fonte secundária, MIT: brunopedrazza/pluggy-mcp-server, `DESIGN.md`. São medições em 3 itens MeuPluggy reais.
 - **[CB]** Fonte secundária, MIT: TrainedLoop/cashbook-mcp, `pluggy/normalize.py`, `classify.py` e `pluggy/client.py`.
 
@@ -25,6 +27,7 @@ Fontes (consultadas em 15/11/2026):
 | `GET /items/{id}` | `connector.name`, `status`, `consentExpiresAt`, `lastUpdatedAt` | [OAS] `Item`, [MP] |
 | `GET /accounts?itemId=` | Contas do item. A resposta tem `{page, total, totalPages, results}` e o endpoint não documenta parâmetro de página. | [OAS] |
 | `GET /v2/transactions?accountId=&dateFrom=` | Transações. Paginação por cursor, até 500 por página. | [BC], [TX] |
+| `GET /bills?accountId=&pageSize=500&page=N` | Faturas **fechadas** do cartão. Paginação por página (`page`, `totalPages`); `pageSize` máximo 500. Só chamado para contas `credit_card`. | [OAS], [BILL] |
 
 - **v1 `/transactions`:** está deprecated e só funciona até 31/12/2026. Aplicações criadas a partir de 02/06/2026 já recebem `410 Gone` (`ENDPOINT_DEPRECATED`) [BC]. A [BP] mediu o 410 em itens MeuPluggy. Por isso usamos só a `/v2`.
 - **Cursor:** a resposta traz `next`, uma *query string* pronta (`?accountId=…&after=…`) ou `null`. Ela é anexada ao path sem alterações, e o `after` nunca deve ser montado à mão [BC]. O cliente recusa um `next` que aponte para outro host e para se o cursor se repetir.
@@ -72,7 +75,7 @@ O JSON é lido com `parse_float=Decimal`, então o valor nunca passa por `float`
 | Cartão | `type` = `CREDIT` (`amount` negativo) | crédito na fatura | Documentado [TX], [OAS]. Estornos também são `CREDIT`, então esse campo sozinho não basta. |
 | Conta corrente | `category` | `"Credit card payment"`, subcategoria de *Transfers* | A categoria existe [CAT]. A [BP] e a [CB] (mapa `CATEGORY_KINDS`) encontraram esse valor em dados reais do MeuPluggy. **NÃO VERIFICADO** em Nubank e Itaú especificamente. |
 | Conta corrente | `operationType` | Algo como `BOLETO`, `CARTAO` ou `OUTROS` | **NÃO VERIFICADO.** Nenhuma fonte diz qual valor o débito do pagamento de fatura recebe na conta corrente. |
-| Ambos | `creditCardMetadata.billId` + valor da fatura (`GET /bills`) | Casar o débito na conta com o total da fatura | `billId` só vem em Open Finance [TX]. A [CB] casa o valor do débito com `bills.totalAmount`. Fica para a Fase 3, e `/bills` ainda não é chamado. |
+| Ambos | `creditCardMetadata.billId` + valor da fatura (`GET /bills`) | Casar o débito na conta com o total da fatura | `billId` só vem em Open Finance [TX]. A [CB] casa o valor do débito com `bills.totalAmount`. Fica para a Fase 3. O `/bills` é sincronizado desde a Fase 2 (ver "Faturas de cartão"). |
 
 Para a Fase 3: considerar pagamento de fatura o débito em conta corrente com `category == "Credit card payment"`, ou um par débito-na-conta / crédito-no-cartão com o mesmo valor e até ~3 dias de diferença. Validar com Nubank e Itaú reais (golden cases).
 
@@ -105,6 +108,39 @@ Para a Fase 3: considerar pagamento de fatura o débito em conta corrente com `c
 | `transactions.description_raw` | `descriptionRaw` se não for nulo; senão `description` | [OAS] |
 | `transactions.status` | `POSTED` / `PENDING` | [OAS] |
 | `transactions.operation_type` | `operationType` (só Open Finance) | [OAS] |
+| `transactions.counterpart_doc_type` | `CPF` (11 dígitos) ou `CNPJ` (14) do documento da contraparte, derivado do tamanho. Não é sensível e serve para mascarar pessoas físicas no MCP. (Migração v2.) | derivado |
+
+## Faturas de cartão (`GET /bills`)
+
+Tabelas `bills` e `bill_payments` (migração v2). Upsert pelo `id` da fatura; os pagamentos de cada fatura são substituídos quando algo muda. Um sync repetido não duplica nada.
+
+| Interno | Pluggy | Status |
+|---|---|---|
+| `bills.id` | `id` | Documentado [OAS], [BILL]; observado [REAL] |
+| `bills.due_date` | `dueDate` (só a data) | Documentado e obrigatório [OAS], [BILL]; observado [REAL] |
+| `bills.closing_date` | `billClosingDate` (só a data; pode ser `null`) | Está na [OAS] (`string \| null`) e foi observado [REAL], mas **não aparece na tabela da página [BILL]**. Tratado como opcional. |
+| `bills.total_cents` | `totalAmount`, arredondado half-up para centavos | Documentado [OAS], [BILL]. Veio com até 4 casas decimais [REAL]. |
+| `bills.currency` | `totalAmountCurrencyCode` | Documentado [OAS], [BILL] |
+| `bills.minimum_payment_cents` | `minimumPaymentAmount` | Opcional [BILL] |
+| `bills.allows_installments` | `allowsInstallments` | Opcional [BILL] |
+| `bill_payments.payment_date` / `amount_cents` | `payments[].paymentDate` / `amount` | Documentado [OAS], [BILL]; observado [REAL] |
+| `bill_payments.value_type` / `payment_mode` | `payments[].valueType` / `paymentMode` | Documentado [OAS], [BILL]. **NÃO VERIFICADO** se o MeuPluggy preenche (a [REAL] só confirmou `paymentDate` e `amount`). |
+| (não gravado) | `financeCharges[]` | A [BILL] avisa que é informativo: linhas `OTHER` podem ser agregados e os encargos também aparecem como transações. Não usamos. |
+| (não gravado) | `createdAt`, `updatedAt` | Vieram na [REAL]; **não estão** no schema `Bill` da [OAS]. |
+
+- **Datas:** vêm como meia-noite UTC (`2026-11-01T00:00:00.000Z` [REAL]; `2023-07-20T00:00:00` nos exemplos da [OAS]). São datas de calendário, então guardamos os 10 primeiros caracteres, sem converter fuso.
+- **Só faturas fechadas.** A fatura aberta não vem do `/bills`; ela é estimada localmente (`analytics/card_bill.py`).
+- **Cobertura:** a [BILL] diz que o Bill é obrigatório em conexões Open Finance *Regulado* e, em conexões *Direct*, só vem para Inter PF e Itaú Cartões. **NÃO VERIFICADO** como o conector MeuPluggy se encaixa; na conta do primeiro usuário, o Nubank devolveu faturas [REAL]. Se o `/bills` responder 4xx (fora 401/403/429), o sync segue e mostra um aviso.
+
+### Estimativa da fatura aberta
+
+Implementada em `analytics/card_bill.py` (funções puras, testes em `tests/test_card_bill.py`). Regra validada pelo usuário contra o app do banco em 15/11/2026:
+
+1. Fechamento usado = `billClosingDate` da última fatura fechada (≤ hoje).
+2. Compras = débitos do cartão com `fechamento ≤ data ≤ hoje`. O dia do fechamento entra: parcelas datadas no dia do fechamento já são da fatura nova.
+3. Créditos = créditos do cartão com `fechamento < data ≤ hoje`, **menos um**: o primeiro cujo valor é igual ao `totalAmount` da fatura anterior (±1 centavo), que é o pagamento dela. Os demais são antecipações (`operationType = PAGAMENTO_FATURA` ou categoria `Credit card payment`) ou outros créditos (estornos).
+4. Estimativa = compras − antecipações − outros créditos. Débitos com data futura são parcelas já agendadas e saem agrupados por mês.
+5. **Ressalva conhecida:** compras "NuPay" do Nubank podem não aparecer como transações do Open Finance (existe uma linha de crédito "Limite Nupay" separada no `creditData` da conta). Isso aparece em `caveats`, sem correção.
 
 ## IDs que mudam (importante para não contar em dobro)
 

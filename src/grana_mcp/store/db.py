@@ -17,8 +17,9 @@ from importlib import resources
 from pathlib import Path
 
 from grana_mcp.config import ensure_private_dir
-from grana_mcp.providers.base import Account, Item, Transaction
+from grana_mcp.providers.base import Account, Bill, Item, Transaction
 
+LATEST_VERSION = 2  # bump together with a new store/migrations/NNNN_*.sql
 _MIGRATION_RE = re.compile(r"^(\d{4})_[a-z0-9_]+\.sql$")
 
 # Provider-owned transaction columns. Re-syncs overwrite only these; columns
@@ -35,6 +36,7 @@ _TX_PROVIDER_COLUMNS = (
     "installment_number",
     "installment_total",
     "counterpart_doc_hash",
+    "counterpart_doc_type",
     "status",
     "operation_type",
 )
@@ -119,6 +121,13 @@ def hash_doc(digits: str, salt: bytes) -> str:
     return hashlib.sha256(salt + digits.encode("ascii")).hexdigest()
 
 
+def doc_type(digits: str | None) -> str | None:
+    """``CPF`` (11 digits) or ``CNPJ`` (14 digits). Not sensitive; kept in clear."""
+    if digits is None:
+        return None
+    return {11: "CPF", 14: "CNPJ"}.get(len(digits))
+
+
 # --- writes ---
 
 
@@ -188,6 +197,7 @@ class Store:
                 tx.installment_number,
                 tx.installment_total,
                 hash_doc(tx.counterpart_doc, self._salt) if tx.counterpart_doc else None,
+                doc_type(tx.counterpart_doc),
                 tx.status,
                 tx.operation_type,
             )
@@ -209,6 +219,69 @@ class Store:
                     (*values, synced_at, tx.id),
                 )
                 counts.updated += 1
+        return counts
+
+    def upsert_bills(self, bills: Iterable[Bill]) -> UpsertCounts:
+        """Insert or update closed bills by provider id; payments are replaced per bill."""
+        counts = UpsertCounts()
+        synced_at = now_utc()
+        for bill in bills:
+            values = (
+                bill.account_id,
+                bill.due_date.isoformat(),
+                bill.closing_date.isoformat() if bill.closing_date else None,
+                bill.total_cents,
+                bill.currency,
+                bill.minimum_payment_cents,
+                None if bill.allows_installments is None else int(bill.allows_installments),
+            )
+            payments = [
+                (
+                    i,
+                    p.payment_date.isoformat() if p.payment_date else None,
+                    p.amount_cents,
+                    p.value_type,
+                    p.payment_mode,
+                )
+                for i, p in enumerate(bill.payments)
+            ]
+            existing = self.conn.execute(
+                "SELECT account_id, due_date, closing_date, total_cents, currency, "
+                "minimum_payment_cents, allows_installments FROM bills WHERE id = ?",
+                (bill.id,),
+            ).fetchone()
+            old_payments = [
+                tuple(r)
+                for r in self.conn.execute(
+                    "SELECT seq, payment_date, amount_cents, value_type, payment_mode "
+                    "FROM bill_payments WHERE bill_id = ? ORDER BY seq",
+                    (bill.id,),
+                )
+            ]
+            if existing is None:
+                self.conn.execute(
+                    "INSERT INTO bills (id, account_id, due_date, closing_date, total_cents, "
+                    "currency, minimum_payment_cents, allows_installments, synced_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (bill.id, *values, synced_at),
+                )
+                counts.new += 1
+            elif tuple(existing) != values or old_payments != payments:
+                self.conn.execute(
+                    "UPDATE bills SET account_id = ?, due_date = ?, closing_date = ?, "
+                    "total_cents = ?, currency = ?, minimum_payment_cents = ?, "
+                    "allows_installments = ?, synced_at = ? WHERE id = ?",
+                    (*values, synced_at, bill.id),
+                )
+                counts.updated += 1
+            else:
+                continue
+            self.conn.execute("DELETE FROM bill_payments WHERE bill_id = ?", (bill.id,))
+            self.conn.executemany(
+                "INSERT INTO bill_payments (bill_id, seq, payment_date, amount_cents, "
+                "value_type, payment_mode) VALUES (?, ?, ?, ?, ?, ?)",
+                [(bill.id, *p) for p in payments],
+            )
         return counts
 
     def delete_missing(self, account_id: str, since: date, keep_ids: set[str]) -> int:
