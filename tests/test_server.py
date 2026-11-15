@@ -99,7 +99,7 @@ def dumps(obj: Any) -> str:
 def test_status(conn: sqlite3.Connection) -> None:
     seed_october(conn)
     out = tools().status()
-    assert out["schema_version"] == 3
+    assert out["schema_version"] == 4
     assert out["ownership"] == "profile" and out["people"] == []
     assert {a["owner"] for a in out["accounts"]} == {"Ana", "Bia"}
     assert {i["id"] for i in out["items"]} == {"item-a", "item-b"}
@@ -365,12 +365,20 @@ def test_mcp_registration(conn: sqlite3.Connection) -> None:
         "excluded_items",
         "recurring_charges",
         "set_category_rule",
+        "board",
+        "set_budget",
+        "set_goal",
+        "delete_goal",
+        "post_notice",
+        "delete_notice",
     }
     assert not any("sync" in n for n in names)
     for t in listed:
         assert t.annotations is not None
-        # set_category_rule is the only tool that writes (local rules table only).
-        assert t.annotations.read_only_hint is (t.name != "set_category_rule")
+        # Only these write, and only to the local database.
+        writers = {"set_category_rule", "set_budget", "set_goal", "delete_goal",
+                   "post_notice", "delete_notice"}  # fmt: skip
+        assert t.annotations.read_only_hint is (t.name not in writers)
     for name in ("spending_summary", "top_merchants", "find_transactions", "excluded_items"):
         desc = next(t.description for t in listed if t.name == name) or ""
         assert "NÃO confiáveis" in desc

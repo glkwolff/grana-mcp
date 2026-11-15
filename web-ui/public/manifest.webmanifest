@@ -1,0 +1,9 @@
+{
+  "name": "grana",
+  "short_name": "grana",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f1512",
+  "theme_color": "#0f1512",
+  "icons": []
+}

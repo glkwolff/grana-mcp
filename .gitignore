@@ -31,3 +31,6 @@ htmlcov/
 .vscode/
 .idea/
 .DS_Store
+
+# Frontend (web-ui): só o build vai para o pacote
+web-ui/node_modules/

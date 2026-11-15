@@ -1,6 +1,6 @@
-# Chat web pessoal (opcional)
+# Painel e chat web pessoal (opcional)
 
-Uma página de chat que você abre no celular, fora de casa, para perguntar sobre os gastos. Quem responde é o Claude Code rodando **no seu PC**, trancado para usar só as ferramentas do grana. O acesso é por uma VPN WireGuard entre o celular e o PC.
+Uma página que você abre no celular, fora de casa, com duas abas: **Painel** (gasto do mês, por pessoa, orçamentos por categoria, objetivos de economia e avisos) e **Conversa** (chat para perguntar sobre os gastos e pedir mudanças no painel, como "coloca um orçamento de R$ 600 para Delivery" ou "guardamos mais 200 na reserva"). Quem responde é o Claude Code rodando **no seu PC**, trancado para usar só as ferramentas do grana. O acesso é por uma VPN WireGuard entre o celular e o PC.
 
 ```
 celular ──WireGuard──▶ PC: container grana-web (porta 8765, só no IP da VPN)
@@ -8,6 +8,10 @@ celular ──WireGuard──▶ PC: container grana-web (porta 8765, só no IP 
                           └─ claude -p --tools "" (só mcp__grana__*) ─▶ grana-mcp serve ─▶ SQLite
 PC (host): grana-mcp sync 1x/dia (credenciais da Pluggy no keyring, fora do container)
 ```
+
+## Como o Claude edita o painel
+
+O Claude não escreve HTML nem código na página. O painel é feito de **dados** (orçamentos, objetivos e avisos) guardados no SQLite local, e o Claude só os altera pelas ferramentas `set_budget`, `set_goal`, `delete_goal`, `post_notice` e `delete_notice`. A página mostra esses dados como texto. Cada edição registra quem pediu.
 
 ## Travas de segurança
 
@@ -61,7 +65,15 @@ systemctl --user daemon-reload && systemctl --user enable --now grana-sync.timer
 
 O PC é o servidor da VPN (ex.: `10.8.0.1/24`), e cada celular é um peer (`10.8.0.2`, `10.8.0.3`). Para alcançar o PC fora de casa, o roteador precisa repassar a porta **UDP 51820** para o PC, e a operadora não pode usar CGNAT. No celular, use o app oficial do WireGuard e importe a configuração por QR code (`qrencode -t ansiutf8 < peer.conf`).
 
-Depois, no celular: `http://10.8.0.1:8765`, cole o token e pronto. Dá para "adicionar à tela inicial".
+Depois, no celular: abra o link que o `web token add` mostra (`http://10.8.0.1:8765/#token=...`), ou um QR code dele, e pronto. A parte `#token=` nunca chega ao servidor e some da barra de endereço depois do login. Dá para "adicionar à tela inicial".
+
+## Mexer na página
+
+O código da página fica em `web-ui/` (Vite + Preact). O build vai direto para `src/grana_mcp/web/static/` e é commitado, então quem instala o pacote não precisa de Node.
+
+```bash
+cd web-ui && npm install && npm run build   # ou: npm run dev (proxy para a API em 127.0.0.1:8765)
+```
 
 ## Testar sem WireGuard
 

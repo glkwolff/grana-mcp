@@ -31,7 +31,7 @@ def test_existing_db_permissions_are_tightened() -> None:
 
 def test_migrations_create_all_tables_and_are_idempotent() -> None:
     conn = db.connect(config.db_path())
-    assert db.schema_version(conn) == db.LATEST_VERSION == 3
+    assert db.schema_version(conn) == db.LATEST_VERSION == 4
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert tables >= {
         "schema_version",
@@ -46,11 +46,14 @@ def test_migrations_create_all_tables_and_are_idempotent() -> None:
         "bill_payments",
         "people",
         "item_identities",
+        "board_budgets",
+        "board_goals",
+        "board_notices",
     }
     conn.close()
     conn = db.connect(config.db_path())
-    assert db.migrate(conn) == 3
-    assert conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == 3
+    assert db.migrate(conn) == 4
+    assert conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == 4
 
 
 def test_salt_is_private_and_stable() -> None:
@@ -73,12 +76,12 @@ def test_numbered_migrations_apply_in_order(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(
         db,
         "_migrations",
-        lambda: [*real, (4, "ALTER TABLE profiles ADD COLUMN note TEXT;")],
+        lambda: [*real, (5, "ALTER TABLE profiles ADD COLUMN note TEXT;")],
     )
     conn = db.connect(config.db_path())
-    assert db.schema_version(conn) == 4
+    assert db.schema_version(conn) == 5
     conn.execute("UPDATE profiles SET note = 'x'")
-    assert db.migrate(conn) == 4  # not re-applied
+    assert db.migrate(conn) == 5  # not re-applied
 
 
 def test_migration_v1_to_latest_keeps_existing_data(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -140,7 +143,7 @@ def test_migration_v2_to_v3_rebuilds_tables_keeping_data(monkeypatch: pytest.Mon
     conn.close()
 
     conn = db.connect(config.db_path())
-    assert db.schema_version(conn) == 3
+    assert db.schema_version(conn) == db.LATEST_VERSION
     cols = [r[1] for r in conn.execute("PRAGMA table_info(transactions)")]
     after = conn.execute("SELECT * FROM transactions ORDER BY id").fetchall()
     old_cols = cols[: len(before[0])]

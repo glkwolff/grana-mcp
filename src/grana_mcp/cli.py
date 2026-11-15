@@ -760,6 +760,10 @@ def web_token_add(user: str) -> None:
         raise typer.Exit(1) from None
     typer.echo(f"Token de '{user.strip().lower()}' (guarde; não será mostrado de novo):")
     typer.echo(token)
+    typer.echo(
+        "Para entrar direto pelo celular, abra (ou gere um QR code com qrencode):\n"
+        f"  http://<IP-do-WireGuard>:8765/#token={token}"
+    )
 
 
 @web_token_app.command("list")

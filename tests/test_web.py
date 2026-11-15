@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import stat
 import sys
 from pathlib import Path
@@ -136,8 +137,14 @@ def test_static_page_and_headers(client: TestClient) -> None:
     assert res.status_code == 200
     assert "grana" in res.text
     assert "frame-ancestors 'none'" in res.headers["content-security-policy"]
-    assert client.get("/app.js").status_code == 200
-    assert client.get("/app.css").status_code == 200
+    assets = re.findall(r'(?:src|href)="(/assets/[^"]+)"', res.text)
+    assert len(assets) == 2
+    for path in assets:
+        asset = client.get(path)
+        assert asset.status_code == 200
+        assert "immutable" in asset.headers["cache-control"]
+        assert asset.headers["x-content-type-options"] == "nosniff"
+    assert client.get("/nao-existe").status_code == 404
 
 
 def test_api_requires_token(client: TestClient) -> None:
@@ -182,7 +189,8 @@ def test_cli_web_tokens_and_serve_guards(monkeypatch: pytest.MonkeyPatch) -> Non
     assert no_users.exit_code == 1 and "token add" in no_users.output
     added = runner.invoke(cli.app, ["web", "token", "add", "gabi"])
     assert added.exit_code == 0
-    token = added.output.strip().splitlines()[-1]
+    token = added.output.strip().splitlines()[1]
+    assert f"#token={token}" in added.output
     assert auth.verify(token) == "gabi"
     assert "gabi" in runner.invoke(cli.app, ["web", "token", "list"]).output
     assert runner.invoke(cli.app, ["web", "token", "add", "X Y"]).exit_code == 1
@@ -194,3 +202,17 @@ def test_cli_web_tokens_and_serve_guards(monkeypatch: pytest.MonkeyPatch) -> Non
     assert runner.invoke(cli.app, ["web", "token", "remove", "gabi"]).exit_code == 0
     assert runner.invoke(cli.app, ["web", "token", "remove", "gabi"]).exit_code == 1
     assert "Nenhum" in runner.invoke(cli.app, ["web", "token", "list"]).output
+
+
+def test_board_api_and_actor_config(client: TestClient, tmp_path: Path) -> None:
+    from grana_mcp.store import db
+
+    h = {"Authorization": f"Bearer {auth.add_user('bia')}"}
+    assert client.get("/api/board").status_code == 401
+    assert client.get("/api/board", headers=h).status_code == 503  # no database yet
+    db.connect(config.db_path()).close()
+    data = client.get("/api/board", headers=h).json()
+    assert data["budgets"] == [] and data["month"]["total"]["cents"] == 0
+    client.post("/api/chat", json={"message": "oi"}, headers=h)
+    cfg = json.loads((tmp_path / "work" / "grana-mcp-bia.json").read_text())
+    assert cfg["mcpServers"]["grana"]["env"]["GRANA_ACTOR"] == "bia"
