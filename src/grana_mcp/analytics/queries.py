@@ -106,10 +106,15 @@ class Filters:
 
     profiles: Sequence[str] | None = None
     people: Sequence[str] | None = None
+    categories: Sequence[str] | None = None
 
     def sql(self) -> tuple[str, list[object]]:
         sql = ""
         params: list[object] = []
+        if self.categories:
+            cats = [x.strip().lower() for x in self.categories]
+            sql += f" AND lower({category_sql()}) IN ({', '.join('?' * len(cats))})"
+            params.extend(cats)
         if self.profiles:
             sql += f" AND t.profile_id IN ({', '.join('?' * len(self.profiles))})"
             params.extend(self.profiles)
@@ -204,6 +209,23 @@ def spending_by(
     else:
         buckets = [Bucket(sanitize_text(str(r["k"])) or "?", r["cents"], r["n"]) for r in rows]
     return sorted(buckets, key=lambda b: (-b.cents, b.key))
+
+
+def spending_by_month(
+    conn: sqlite3.Connection,
+    period: Period,
+    today: date,
+    filters: Filters | Sequence[str] | None = None,
+) -> list[tuple[str, str, int, int]]:
+    """(``YYYY-MM``, person, cents, count) for every month/person with spending."""
+    where, params = _spending_where(period, today, filters)
+    rows = conn.execute(
+        f"SELECT substr(t.posted_date, 1, 7) AS m, {PERSON_SQL} AS who, "  # noqa: S608
+        f"-SUM(t.amount_cents) AS cents, COUNT(*) AS n FROM {TX_FROM} WHERE {where} "
+        "GROUP BY m, who ORDER BY m, who",
+        params,
+    ).fetchall()
+    return [(r["m"], sanitize_text(str(r["who"])) or "?", r["cents"], r["n"]) for r in rows]
 
 
 _LEGAL_SUFFIX_RE = re.compile(

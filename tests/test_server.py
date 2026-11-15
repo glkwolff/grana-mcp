@@ -99,7 +99,7 @@ def dumps(obj: Any) -> str:
 def test_status(conn: sqlite3.Connection) -> None:
     seed_october(conn)
     out = tools().status()
-    assert out["schema_version"] == 4
+    assert out["schema_version"] == db.LATEST_VERSION
     assert out["ownership"] == "profile" and out["people"] == []
     assert {a["owner"] for a in out["accounts"]} == {"Ana", "Bia"}
     assert {i["id"] for i in out["items"]} == {"item-a", "item-b"}
@@ -550,3 +550,46 @@ def test_set_category_rule_tool(conn: sqlite3.Connection) -> None:
         tools().set_category_rule("ab", "Pets")
     with pytest.raises(ToolError):
         tools().set_category_rule("(", "Pets", "regex")
+
+
+# --- web dashboards ---
+
+
+def test_insights(conn: sqlite3.Connection) -> None:
+    seed_october(conn)
+    add_tx(conn, "2026-09-02", -80_00, category="Groceries")
+    add_tx(conn, "2026-11-10", -25_00, category="Groceries")
+    conn.commit()
+    out = tools().insights("2026-10")
+    assert out["previous"]["from"] == "2026-09-01" and out["previous"]["to"] == "2026-09-30"
+    assert out["previous_total"]["cents"] == 80_00
+    cats = {c["key"]: c for c in out["by_category"]}
+    assert cats["Groceries"]["amount"]["cents"] == 100_00
+    assert cats["Groceries"]["previous"]["cents"] == 80_00
+    assert "Credit card payment" not in cats  # excluded rows never count
+    months = out["monthly"]["months"]
+    assert len(months) == 12 and months[-1]["month"] == "2026-11"
+    assert months[-1]["total"]["cents"] == 25_00
+    oct_ = next(m for m in months if m["month"] == "2026-10")
+    assert sum(oct_["by_person"]) == oct_["total"]["cents"] == out["total"]["cents"]
+    assert out["monthly"]["people"] == sorted(out["monthly"]["people"])
+    # month-to-date compares with the same days of the month before
+    mtd = tools().insights("this_month")
+    assert mtd["previous"]["from"] == "2026-10-01" and mtd["previous"]["to"] == "2026-10-15"
+    three = tools().insights("last_3_months")
+    assert three["previous"]["from"] == "2026-06-01" and three["previous"]["to"] == "2026-08-15"
+
+
+def test_category_detail(conn: sqlite3.Connection) -> None:
+    seed_october(conn)
+    out = tools().category_detail("food delivery", "2026-10")
+    assert out["total"]["cents"] == 80_00 and out["count"] == 2
+    assert [m["key"] for m in out["merchants"]] and out["merchants"][0]["count"] == 2
+    assert out["transactions_total"] == 2 and len(out["transactions"]) == 2
+    assert all(t["category"] == "Food delivery" for t in out["transactions"])
+    pix = tools().category_detail("Transfer - PIX", "2026-10")
+    assert "Fulano" not in dumps(pix)  # third-party people stay masked
+    with pytest.raises(ToolError):
+        tools().category_detail("  ", "2026-10")
+    with pytest.raises(ToolError):
+        tools().category_detail("Groceries", "ontem")

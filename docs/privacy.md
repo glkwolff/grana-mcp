@@ -26,6 +26,10 @@ O servidor MCP roda por stdio e **não abre porta de rede**. Mas tudo o que uma 
 - **Recorrências** não listam Pix para pessoa física.
 - O **nome e o final do número das suas contas** aparecem (ex.: `Nubank ****90-5`), para você saber de qual conta é cada valor.
 
+## Notificações no celular (opcional)
+
+Se você ativar `grana-mcp notify`, o PC manda avisos curtos (valor, categoria, nome do estabelecimento) pelo serviço de push do celular (Apple, Google ou Mozilla). O texto é criptografado para o aparelho antes de sair do PC, e o serviço de push só vê o endereço do aparelho, o tamanho e a hora. Pessoas físicas de fora da casa aparecem como "PIX → pessoa física", como no `find_transactions`.
+
 ## Texto de terceiros é dado, não instrução
 
 A descrição de uma transação (por exemplo, a mensagem de um Pix) é escrita por outra pessoa e pode tentar dar ordens ao modelo. O grana-mcp:

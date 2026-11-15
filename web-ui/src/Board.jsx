@@ -1,22 +1,7 @@
 // Painel: gasto do mês, avisos, orçamentos, objetivos e categorias.
 // Tudo vem de /api/board como texto/valores; nada é renderizado como HTML.
 
-const brl = (m) => m?.brl ?? "R$ 0,00";
-const cents = (m) => m?.cents ?? 0;
-
-function fmtDate(iso) {
-  if (!iso) return null;
-  const [y, m, d] = iso.slice(0, 10).split("-");
-  return `${d}/${m}/${y}`;
-}
-
-function ago(iso) {
-  if (!iso) return "nunca";
-  const mins = Math.round((Date.now() - Date.parse(iso)) / 60000);
-  if (mins < 60) return `há ${Math.max(mins, 1)} min`;
-  const hrs = Math.round(mins / 60);
-  return hrs < 48 ? `há ${hrs} h` : `há ${Math.round(hrs / 24)} dias`;
-}
+import { ago, brl, brlCents, cents, fmtDate, monthName } from "./fmt.js";
 
 function Bar({ pct, tone }) {
   const w = Math.max(0, Math.min(pct, 100));
@@ -45,7 +30,7 @@ function Section({ title, hint, children, empty }) {
   );
 }
 
-export function Board({ data, error, onAsk }) {
+export function Board({ data, error, onAsk, onOpenCategory, onMore }) {
   if (error) return <div class="board"><div class="card error">{error}</div></div>;
   if (!data) return <div class="board"><div class="card skeleton" /><div class="card skeleton" /></div>;
 
@@ -63,9 +48,11 @@ export function Board({ data, error, onAsk }) {
         <div class="hero-total">{brl(m.total)}</div>
         <div class="hero-sub">
           {delta !== null && (
-            <span class={`pill ${delta > 0 ? "up" : "down"}`}>
-              {delta > 0 ? "▲" : "▼"} {Math.abs(delta)}% vs. mesmo período do mês passado
-            </span>
+            delta === 0
+              ? <span class="pill flat">= igual ao mesmo período do mês passado</span>
+              : <span class={`pill ${delta > 0 ? "up" : "down"}`}>
+                  {delta > 0 ? "▲" : "▼"} {Math.abs(delta)}% vs. mesmo período do mês passado
+                </span>
           )}
           <span class="muted small">{m.count} lançamentos · atualizado {ago(data.last_sync)}</span>
         </div>
@@ -110,6 +97,7 @@ export function Board({ data, error, onAsk }) {
               const left = cents(b.limit) - cents(b.spent);
               return (
                 <li key={`${b.category}-${b.person || ""}`}>
+                  <button class="budget" onClick={() => onOpenCategory(b.category)}>
                   <div class="row">
                     <strong>{b.category}{b.person ? ` · ${b.person}` : ""}</strong>
                     <span class={`num ${tone}`}>{Math.round(b.pct)}%</span>
@@ -120,6 +108,7 @@ export function Board({ data, error, onAsk }) {
                     <span>{left >= 0 ? `sobram ${brlCents(left)}` : `passou ${brlCents(-left)}`}</span>
                   </div>
                   {b.note && <div class="muted small">{b.note}</div>}
+                  </button>
                 </li>
               );
             })}
@@ -151,15 +140,16 @@ export function Board({ data, error, onAsk }) {
         )}
       </Section>
 
-      <Section title="Para onde foi" empty="Sem gastos neste mês ainda.">
+      <Section title="Para onde foi" hint={<button class="link" onClick={onMore}>ver análises</button>} empty="Sem gastos neste mês ainda.">
         {m.by_category.length > 0 && (
           <ul class="cats">
             {m.by_category.map((c) => (
               <li key={c.key}>
-                <button class="cat" onClick={ask(`Quanto gastamos com ${c.key} este mês e onde?`)}>
+                <button class="cat" onClick={() => onOpenCategory(c.key)}>
                   <span class="cat-name">{c.key}</span>
                   <span class="cat-bar"><span style={{ width: `${(cents(c.amount) / maxCat) * 100}%` }} /></span>
                   <span class="num">{brl(c.amount)}</span>
+                  <span class="chev" aria-hidden="true">›</span>
                 </button>
               </li>
             ))}
@@ -168,15 +158,4 @@ export function Board({ data, error, onAsk }) {
       </Section>
     </div>
   );
-}
-
-function brlCents(c) {
-  const v = (Math.abs(c) / 100).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  return `R$ ${v}`;
-}
-
-const MONTHS = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"];
-function monthName(label) {
-  const [, mm] = (label || "").split("-");
-  return MONTHS[Number(mm) - 1] || label;
 }

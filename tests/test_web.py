@@ -5,6 +5,7 @@ import re
 import stat
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 from starlette.testclient import TestClient
@@ -342,3 +343,40 @@ def test_missing_claude_binary_reports_error(tmp_path: Path) -> None:
     h = {"Authorization": f"Bearer {auth.add_user('ana')}"}
     out = events(client.post("/api/chat", json={"message": "oi"}, headers=h).text)
     assert out == [{"type": "error", "message": "O Claude Code não foi encontrado no servidor."}]
+
+
+def test_dashboard_apis(client: TestClient) -> None:
+    from grana_mcp.store import db
+
+    h = {"Authorization": f"Bearer {auth.add_user('bia')}"}
+    assert client.get("/api/insights").status_code == 401
+    assert client.get("/api/category?name=Mercado").status_code == 401
+    assert client.get("/api/insights", headers=h).status_code == 503  # no database yet
+    db.connect(config.db_path()).close()
+    data = client.get("/api/insights?period=last_month", headers=h).json()
+    assert data["total"]["cents"] == 0 and len(data["monthly"]["months"]) == 12
+    assert client.get("/api/insights?period=ontem", headers=h).status_code == 400
+    cat = client.get("/api/category?name=Mercado&period=last_3_months", headers=h).json()
+    assert cat["category"] == "Mercado" and cat["transactions"] == []
+    assert client.get("/api/category?name=", headers=h).status_code == 400
+
+
+def test_identity_behind_serve(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    # TestClient connects as "testclient": pretend that is the PC (the proxy).
+    monkeypatch.setattr(auth, "trusted_proxies", lambda: {"testclient"})
+    owners = {"testclient": "gabriel", "100.64.0.7": "bia"}
+
+    async def fake_ts_user(ip: str, tailscale_bin: str = "tailscale") -> str | None:
+        return owners.get(ip)
+
+    monkeypatch.setattr(auth, "tailscale_user", fake_ts_user)
+    auth.tailscale_add("bia@github", "bia")
+
+    def me(h: dict[str, str]) -> Any:
+        return client.get("/api/me", headers=h)
+
+    assert me({auth.LOGIN_HEADER: "bia@github"}).json() == {"user": "bia"}
+    assert me({"X-Forwarded-For": "1.2.3.4, 100.64.0.7"}).json() == {"user": "bia"}
+    assert me({}).json() == {"user": "gabriel"}  # browser on the PC itself
+    assert me({"X-Forwarded-For": "lixo"}).json() == {"user": "gabriel"}
+    assert auth.forwarded_peer("100.64.0.7") == "100.64.0.7" and auth.forwarded_peer("x") is None

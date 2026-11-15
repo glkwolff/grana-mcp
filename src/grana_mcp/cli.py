@@ -75,6 +75,10 @@ web_token_app = typer.Typer(help="Tokens de acesso ao chat web.", no_args_is_hel
 web_app.add_typer(web_token_app, name="token")
 web_ts_app = typer.Typer(help="Acesso pela conta do Tailscale (sem token).", no_args_is_help=True)
 web_app.add_typer(web_ts_app, name="tailscale")
+notify_app = typer.Typer(
+    help="Notificações no celular (Web Push pela página web).", no_args_is_help=True
+)
+app.add_typer(notify_app, name="notify")
 
 
 def make_client(creds: Credentials) -> PluggyClient:
@@ -235,6 +239,16 @@ def sync(
     store.conn.close()
     if failed:
         raise typer.Exit(1)
+
+
+@contextmanager
+def db_conn() -> Iterator[sqlite3.Connection]:
+    """Plain connection to the local database (created/migrated if needed)."""
+    conn = db.connect(config.db_path())
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 @contextmanager
@@ -829,6 +843,99 @@ def web_tailscale_remove(login: str) -> None:
         typer.echo(f"Conta '{login}' não está liberada.", err=True)
         raise typer.Exit(1)
     typer.echo(f"Acesso de '{login}' revogado.")
+
+
+@notify_app.command("setup")
+def notify_setup(
+    force: Annotated[
+        bool, typer.Option(help="Gera chaves novas (desinscreve os celulares).")
+    ] = False,
+) -> None:
+    """Cria as chaves VAPID: a privada vai para o keyring, a pública para o diretório de config."""
+    from grana_mcp.notify import push
+
+    try:
+        push.setup(force=force)
+    except keyring.errors.KeyringError as exc:
+        typer.echo(f"Keyring indisponível: {exc}", err=True)
+        raise typer.Exit(1) from None
+    if force:
+        with db_conn() as conn:
+            conn.execute("DELETE FROM push_subscriptions")
+            conn.commit()
+    typer.echo(
+        f"Chaves prontas ({push.public_key_path()}). Abra a página no celular e toque em "
+        "'Ativar notificações'. Depois: grana-mcp notify test"
+    )
+
+
+@notify_app.command("run")
+def notify_run(
+    big_purchase: Annotated[float, typer.Option(help="Gasto a partir de (R$).")] = 500.0,
+    weekly: Annotated[bool, typer.Option(help="Resumo da semana no domingo à noite.")] = True,
+    purchases: Annotated[bool, typer.Option(help="Resumo dos gastos novos a cada sync.")] = True,
+    dry_run: Annotated[bool, typer.Option(help="Só lista o que seria enviado.")] = False,
+) -> None:
+    """Envia os avisos pendentes (o timer grana-notify roda isto a cada 15 min)."""
+    from grana_mcp.notify import alerts, push, service
+
+    settings = alerts.Settings(
+        big_purchase_cents=round(big_purchase * 100), weekly=weekly, purchases=purchases
+    )
+    with db_conn() as conn:
+        try:
+            result = service.run(conn, config.db_path(), settings, dry_run=dry_run)
+        except push.PushError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(1) from None
+    if result.bootstrapped:
+        typer.echo(f"1ª execução: {result.bootstrapped} aviso(s) atuais marcados como vistos.")
+    for a in result.sent:
+        typer.echo(f"- {a.title}: {a.body}")
+    if not dry_run:
+        typer.echo(
+            f"{len(result.sent)} aviso(s), {result.deliveries} entrega(s), "
+            f"{result.failures} falha(s)"
+            + (f", {result.deferred} adiado(s) pelo horário de silêncio" if result.deferred else "")
+            + "."
+        )
+
+
+@notify_app.command("test")
+def notify_test(
+    user: Annotated[str | None, typer.Argument(help="Só os celulares desta pessoa.")] = None,
+) -> None:
+    """Manda uma notificação de teste para os celulares inscritos."""
+    from grana_mcp.notify import push, service
+
+    with db_conn() as conn:
+        try:
+            ok, bad = service.test(conn, user)
+        except push.PushError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(1) from None
+    typer.echo(f"{ok} entregue(s), {bad} falha(s).")
+    if not ok:
+        raise typer.Exit(1)
+
+
+@notify_app.command("list")
+def notify_list() -> None:
+    """Celulares inscritos para receber notificações."""
+    from urllib.parse import urlsplit
+
+    from grana_mcp.notify import service
+
+    with db_conn() as conn:
+        rows = service.subscriptions(conn)
+    for r in rows:
+        host = urlsplit(r["endpoint"]).hostname
+        last = (r["last_ok_at"] or "-")[:16]
+        typer.echo(
+            f"{r['id']:>3}  {r['user']:<10} {host}  desde {r['created_at'][:10]}  ok: {last}"
+        )
+    if not rows:
+        typer.echo("Nenhum celular inscrito.")
 
 
 @app.command()

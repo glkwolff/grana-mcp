@@ -1,0 +1,13 @@
+# Notificações no celular, rodando no HOST (a chave VAPID fica no keyring do host).
+# Copie este arquivo e o grana-notify.timer para ~/.config/systemd/user/ e rode
+#   grana-mcp notify setup
+#   systemctl --user daemon-reload && systemctl --user enable --now grana-notify.timer
+[Unit]
+Description=grana-mcp notify (avisos pendentes -> Web Push)
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Antes de publicar no PyPI, use o clone do repo:
+#   ExecStart=%h/.local/bin/uv --directory %h/appfinancas run grana-mcp notify run
+ExecStart=%h/.local/bin/uvx grana-mcp notify run

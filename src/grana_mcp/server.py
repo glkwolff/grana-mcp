@@ -25,7 +25,13 @@ from mcp.types import ToolAnnotations
 from grana_mcp import __version__, board, config
 from grana_mcp.analytics import queries
 from grana_mcp.analytics.card_bill import estimate_open_bill
-from grana_mcp.analytics.periods import Period, PeriodError, parse_period
+from grana_mcp.analytics.periods import (
+    Period,
+    PeriodError,
+    month_bounds,
+    parse_period,
+    shift_month,
+)
 from grana_mcp.money import format_brl
 from grana_mcp.pipeline import categorize as cat
 from grana_mcp.pipeline import recurring
@@ -803,6 +809,137 @@ class GranaTools:
             "cards": cards,
             "cards_omitted": max(len(accounts) - MAX_CARDS, 0),
             "summary": summary + ".",
+        }
+
+    # --- web dashboards (read-only aggregates for the web page, not MCP tools) ---
+
+    def _previous(self, p: Period, today: date) -> Period:
+        """Same-length period right before ``p`` (month-to-date compares to the same day)."""
+        if p.start.day == 1 and (p.end + timedelta(days=1)).day == 1:
+            months = (p.end.year - p.start.year) * 12 + p.end.month - p.start.month + 1
+            y, m = shift_month(p.start.year, p.start.month, -months)
+            ey, em = shift_month(p.end.year, p.end.month, -months)
+            start, end = month_bounds(y, m)[0], month_bounds(ey, em)[1]
+            if p.start <= today <= p.end:
+                ty, tm = shift_month(today.year, today.month, -months)
+                end = min(end, date(ty, tm, min(today.day, month_bounds(ty, tm)[1].day)))
+            return Period(start, end, f"{start.isoformat()}..{end.isoformat()}")
+        days = (p.end - p.start).days + 1
+        return Period(p.start - timedelta(days=days), p.start - timedelta(days=1), "anterior")
+
+    def _months(self, today: date, n: int = 12) -> Period:
+        y, m = shift_month(today.year, today.month, -(n - 1))
+        return Period(date(y, m, 1), month_bounds(today.year, today.month)[1], f"last_{n}_months")
+
+    @staticmethod
+    def _series(rows: list[tuple[str, str, int, int]], window: Period) -> dict[str, Any]:
+        months: list[str] = []
+        y, m = window.start.year, window.start.month
+        while (y, m) <= (window.end.year, window.end.month):
+            months.append(f"{y:04d}-{m:02d}")
+            y, m = shift_month(y, m, 1)
+        people = sorted({who for _, who, _, _ in rows})
+        cells: dict[tuple[str, str], int] = {(mo, who): c for mo, who, c, _ in rows}
+        return {
+            "people": people,
+            "months": [
+                {
+                    "month": mo,
+                    "total": money(sum(cells.get((mo, w), 0) for w in people)),
+                    "by_person": [cells.get((mo, w), 0) for w in people],
+                }
+                for mo in months
+            ],
+        }
+
+    def insights(self, period: PeriodArg = "this_month") -> dict[str, Any]:
+        today = self._today()
+        p = self._period(period)
+        prev = self._previous(p, today)
+        window = self._months(today)
+        with self._conn() as conn:
+            total = queries.spending_total(conn, p, today)
+            prev_total = queries.spending_total(conn, prev, today)
+            cats = queries.spending_by(conn, p, today, "category")
+            prev_cats = {b.key: b.cents for b in queries.spending_by(conn, prev, today, "category")}
+            people = queries.spending_by(conn, p, today, "person")
+            merchants = queries.spending_by(conn, p, today, "merchant")
+            series = queries.spending_by_month(conn, window, today)
+        rec = self.recurring_charges()
+        bills = self.card_bills()
+        return {
+            "period": p.as_dict(),
+            "previous": prev.as_dict(),
+            "total": money(total.cents),
+            "count": total.count,
+            "previous_total": money(prev_total.cents),
+            "by_category": [
+                {
+                    "key": b.key,
+                    "amount": money(b.cents),
+                    "count": b.count,
+                    "previous": money(prev_cats.get(b.key, 0)),
+                    "share_pct": pct(b.cents, total.cents),
+                }
+                for b in cats[:MAX_ROWS]
+            ],
+            "by_person": [
+                {"key": b.key, "amount": money(b.cents), "count": b.count} for b in people
+            ],
+            "top_merchants": [
+                {"key": b.key, "amount": money(b.cents), "count": b.count}
+                for b in merchants[:DEFAULT_TOP_N]
+            ],
+            "monthly": self._series(series, window),
+            "recurring": {
+                "monthly_total": rec["active_monthly_total"],
+                "items": rec["items"][:DEFAULT_TOP_N],
+            },
+            "cards": [
+                {
+                    "account": c["account"],
+                    "owner": c["owner"],
+                    "open_bill": c["open_bill_estimate"]["estimated"],
+                    "closing_date": c["open_bill_estimate"]["closing_date_used"],
+                }
+                for c in bills["cards"]
+            ],
+        }
+
+    def category_detail(self, name: str, period: PeriodArg = "this_month") -> dict[str, Any]:
+        category = sanitize_text(name, 64)
+        if not category:
+            raise ToolError("Informe a categoria.")
+        today = self._today()
+        p = self._period(period)
+        prev = self._previous(p, today)
+        window = self._months(today)
+        f = queries.Filters(categories=[category])
+        with self._conn() as conn:
+            total = queries.spending_total(conn, p, today, f)
+            overall = queries.spending_total(conn, p, today)
+            prev_total = queries.spending_total(conn, prev, today, f)
+            merchants = queries.spending_by(conn, p, today, "merchant", f)
+            people = queries.spending_by(conn, p, today, "person", f)
+            series = queries.spending_by_month(conn, window, today, f)
+        tx = self.find_transactions(category=category, period=period, limit=MAX_ROWS)
+        return {
+            "category": category,
+            "period": p.as_dict(),
+            "total": money(total.cents),
+            "count": total.count,
+            "share_pct": pct(total.cents, overall.cents),
+            "previous_total": money(prev_total.cents),
+            "by_person": [
+                {"key": b.key, "amount": money(b.cents), "count": b.count} for b in people
+            ],
+            "merchants": [
+                {"key": b.key, "amount": money(b.cents), "count": b.count} for b in merchants[:15]
+            ],
+            "merchants_omitted": max(len(merchants) - 15, 0),
+            "monthly": self._series(series, window),
+            "transactions": tx["rows"],
+            "transactions_total": tx["total_matches"],
         }
 
 

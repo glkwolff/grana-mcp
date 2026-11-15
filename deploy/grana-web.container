@@ -19,6 +19,10 @@ Volume=grana-claude:/home/grana/.claude:Z
 # Remova estas duas linhas se usar WireGuard + tokens.
 Volume=/usr/bin/tailscale:/usr/bin/tailscale:ro
 Volume=/var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock
+# HTTPS pelo `tailscale serve` (necessário para notificações no iPhone): o tailscaled
+# do host conecta vindo do próprio IP da VPN e informa quem é a pessoa num cabeçalho,
+# que só é aceito em conexões vindas deste endereço.
+Environment=GRANA_WEB_TRUSTED_PROXY=LISTEN_IP
 # Token do Claude gerado com `claude setup-token` e guardado com:
 #   printf '%s' "<token>" | podman secret create grana-claude-token -
 Secret=grana-claude-token,type=env,target=CLAUDE_CODE_OAUTH_TOKEN

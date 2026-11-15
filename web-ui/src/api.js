@@ -1,3 +1,4 @@
+import { useEffect, useState } from "preact/hooks";
 const KEY = "grana-token";
 
 export function getToken() {
@@ -51,4 +52,22 @@ export async function streamChat(message, onEvent) {
       if (chunk.startsWith("data: ")) onEvent(JSON.parse(chunk.slice(6)));
     }
   }
+}
+
+/** GET a JSON view; refetches when ``path`` changes. ``onUnauthorized`` logs out. */
+export function useView(path, onUnauthorized) {
+  const [state, setState] = useState({ data: null, error: "", loading: true });
+  useEffect(() => {
+    let live = true;
+    setState((s) => ({ ...s, loading: true, error: "" }));
+    getJSON(path)
+      .then((data) => live && setState({ data, error: "", loading: false }))
+      .catch((err) => {
+        if (!live) return;
+        if (err instanceof Unauthorized) onUnauthorized?.();
+        else setState((s) => ({ ...s, error: err.message, loading: false }));
+      });
+    return () => { live = false; };
+  }, [path]);
+  return state;
 }

@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import os
 import re
 import secrets
 import time
@@ -169,3 +170,42 @@ async def tailscale_user(ip: str, tailscale_bin: str = "tailscale") -> str | Non
         login = await whois_login(ip, tailscale_bin)
         _whois_cache[ip] = (now, login)
     return mapping.get(login) if login else None
+
+
+# --- behind `tailscale serve` (HTTPS) ---
+#
+# tailscaled terminates TLS and proxies to the container, so every request comes
+# from the proxy's address and `whois` would name the PC's owner. It strips any
+# Tailscale-User-* headers sent by the client and sets them for the real peer, so
+# they are trusted, but ONLY on connections from the configured proxy address.
+
+PROXY_ENV = "GRANA_WEB_TRUSTED_PROXY"  # comma-separated IPs (as the container sees them)
+LOGIN_HEADER = "tailscale-user-login"
+
+
+def trusted_proxies() -> set[str]:
+    raw = os.environ.get(PROXY_ENV, "")
+    out = set()
+    for part in raw.split(","):
+        try:
+            out.add(str(ipaddress.ip_address(part.strip())))
+        except ValueError:
+            continue
+    return out
+
+
+def forwarded_peer(header: str | None) -> str | None:
+    """Client IP appended by the proxy (last X-Forwarded-For entry), if valid."""
+    if not header:
+        return None
+    try:
+        return str(ipaddress.ip_address(header.split(",")[-1].strip()))
+    except ValueError:
+        return None
+
+
+def serve_user(ip: str, login: str | None) -> str | None:
+    """Chat user named by tailscale serve's header; None if not from the proxy."""
+    if not login or ip not in trusted_proxies():
+        return None
+    return _load_ts().get(login.strip().lower())

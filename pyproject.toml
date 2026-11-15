@@ -27,6 +27,9 @@ dependencies = [
     "typer==0.29.1",
     "uvicorn==0.54.0",
     "tzdata==2026.1 ; sys_platform == 'win32'",
+    "http-ece==1.2.1",
+    "py-vapid==1.9.6",
+    "cryptography==50.0.2",
 ]
 
 [project.urls]
@@ -70,3 +73,7 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "S"]
 python_version = "3.12"
 strict = true
 files = ["src", "tests"]
+
+[[tool.mypy.overrides]]
+module = ["http_ece", "py_vapid"]  # no type hints upstream
+ignore_missing_imports = true
