@@ -276,3 +276,58 @@ def test_chat_rate_limit_and_ip_block(fake_claude: Path, tmp_path: Path) -> None
         assert client.get("/api/me", headers=bad).status_code == 401
     blocked = client.get("/api/me", headers=h)  # same IP, even with a good token
     assert blocked.status_code == 429
+
+
+# --- Tailscale identity ---
+
+
+def test_tailscale_identity_login(
+    fake_claude: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    whois = tmp_path / "tailscale"
+    whois.write_text(
+        f"#!{sys.executable}\nimport json, sys\n"
+        "ip = sys.argv[-1]\n"
+        "if ip == '100.82.21.14':\n"
+        "    print(json.dumps({'UserProfile': {'LoginName': 'Ana@GitHub'}, 'Node': {}}))\n"
+        "else:\n"
+        "    sys.exit(1)\n"
+    )
+    whois.chmod(0o755)
+    assert asyncio.run(auth.whois_login("100.82.21.14", str(whois))) == "ana@github"
+    assert asyncio.run(auth.whois_login("100.1.1.1", str(whois))) is None
+    assert asyncio.run(auth.whois_login("192.168.0.2", str(whois))) is None
+    assert asyncio.run(auth.whois_login("nao-ip", str(whois))) is None
+
+    assert asyncio.run(auth.tailscale_user("100.82.21.14", str(whois))) is None  # no mapping
+    auth.tailscale_add("ana@github", "Ana")
+    assert auth.tailscale_users() == {"ana@github": "ana"}
+    assert asyncio.run(auth.tailscale_user("100.82.21.14", str(whois))) == "ana"
+    with pytest.raises(ValueError):
+        auth.tailscale_add("sem-arroba", "ana")
+    with pytest.raises(ValueError):
+        auth.tailscale_add("x@y", "Nome Ruim")
+    assert auth.tailscale_remove("ana@github") and not auth.tailscale_remove("ana@github")
+
+
+def test_app_uses_tailscale_identity(
+    fake_claude: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_user(ip: str, tailscale_bin: str = "tailscale") -> str | None:
+        return "ana" if ip == "testclient" else None
+
+    monkeypatch.setattr(auth, "tailscale_user", fake_user)
+    cfg = cr.RunnerConfig(claude_bin=str(fake_claude), workdir=tmp_path / "w")
+    client = TestClient(create_app(cfg))
+    assert client.get("/api/me").json() == {"user": "ana"}  # no token at all
+
+
+def test_cli_web_tailscale_commands() -> None:
+    assert runner.invoke(cli.app, ["web", "tailscale", "add", "bia@github", "bia"]).exit_code == 0
+    assert "bia@github -> bia" in runner.invoke(cli.app, ["web", "tailscale", "list"]).output
+    assert runner.invoke(cli.app, ["web", "tailscale", "add", "x", "bia"]).exit_code == 1
+    assert runner.invoke(cli.app, ["web", "tailscale", "remove", "bia@github"]).exit_code == 0
+    assert runner.invoke(cli.app, ["web", "tailscale", "remove", "bia@github"]).exit_code == 1
+    assert "Nenhuma" in runner.invoke(cli.app, ["web", "tailscale", "list"]).output

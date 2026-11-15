@@ -75,8 +75,13 @@ async def _user(request: Request, state: State) -> str:
     wait = state.guard.blocked(ip)
     if wait:
         raise Denied(_too_many("muitas tentativas com token errado; espere", wait))
+    ts_user = await auth.tailscale_user(ip)
+    if ts_user is not None:
+        return ts_user
     header = request.headers.get("authorization", "")
     token = header[7:].strip() if header.lower().startswith("bearer ") else None
+    if token in ("", "null", "undefined"):
+        token = None
     user = auth.verify(token)
     if user is None:
         state.guard.failed(ip)

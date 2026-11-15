@@ -1,6 +1,6 @@
 import { render } from "preact";
 import { useCallback, useEffect, useState } from "preact/hooks";
-import { api, getJSON, getToken, setToken, Unauthorized } from "./api.js";
+import { api, getJSON, setToken, Unauthorized } from "./api.js";
 import { Board } from "./Board.jsx";
 import { Chat } from "./Chat.jsx";
 import "./styles.css";
@@ -19,7 +19,7 @@ function Login({ onLogin, error }) {
         }}
       >
         <div class="brand big"><span class="dot" />grana</div>
-        <p class="muted">Cole o seu token de acesso, gerado com <code>grana-mcp web token add &lt;nome&gt;</code>.</p>
+        <p class="muted">Abra pelo Tailscale com uma conta liberada (<code>grana-mcp web tailscale add</code>) ou cole um token de <code>grana-mcp web token add &lt;nome&gt;</code>.</p>
         <input type="password" autocomplete="current-password" placeholder="token" value={value} onInput={(e) => setValue(e.currentTarget.value)} required />
         {error && <p class="err">{error}</p>}
         <button type="submit" class="primary">Entrar</button>
@@ -37,7 +37,8 @@ if (location.hash.startsWith("#token=")) {
 function App() {
   const [user, setUser] = useState(null);
   const [authError, setAuthError] = useState("");
-  const [needLogin, setNeedLogin] = useState(!getToken());
+  // Inside the tailnet the server knows who we are; try /api/me before asking for a token.
+  const [needLogin, setNeedLogin] = useState(false);
   const [tab, setTab] = useState("board");
   const [board, setBoard] = useState(null);
   const [boardError, setBoardError] = useState("");
@@ -59,7 +60,7 @@ function App() {
     } catch (err) { logout(err instanceof Unauthorized ? "Token inválido." : err.message); }
   }, [loadBoard, logout]);
 
-  useEffect(() => { if (!needLogin) login(); }, []);
+  useEffect(() => { login(); }, []);
   useEffect(() => {
     const t = setInterval(() => { if (!needLogin && document.visibilityState === "visible") loadBoard(); }, 60000);
     return () => clearInterval(t);

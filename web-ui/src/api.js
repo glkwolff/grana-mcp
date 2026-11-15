@@ -10,9 +10,10 @@ export function setToken(t) {
 export class Unauthorized extends Error {}
 
 export async function api(path, opts = {}) {
+  const token = getToken();
   const res = await fetch(path, {
     ...opts,
-    headers: { ...(opts.headers || {}), Authorization: `Bearer ${getToken()}` },
+    headers: { ...(opts.headers || {}), ...(token ? { Authorization: `Bearer ${token}` } : {}) },
   });
   if (res.status === 401) throw new Unauthorized();
   return res;

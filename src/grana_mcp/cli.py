@@ -73,6 +73,8 @@ web_app = typer.Typer(
 app.add_typer(web_app, name="web")
 web_token_app = typer.Typer(help="Tokens de acesso ao chat web.", no_args_is_help=True)
 web_app.add_typer(web_token_app, name="token")
+web_ts_app = typer.Typer(help="Acesso pela conta do Tailscale (sem token).", no_args_is_help=True)
+web_app.add_typer(web_ts_app, name="tailscale")
 
 
 def make_client(creds: Credentials) -> PluggyClient:
@@ -735,12 +737,17 @@ def web_serve(
             err=True,
         )
         raise typer.Exit(1)
-    if not auth.users():
-        typer.echo("Crie um acesso antes: grana-mcp web token add <nome>", err=True)
+    if not auth.users() and not auth.tailscale_users():
+        typer.echo(
+            "Crie um acesso antes: grana-mcp web tailscale add <login> <nome> "
+            "ou grana-mcp web token add <nome>",
+            err=True,
+        )
         raise typer.Exit(1)
     import uvicorn
 
-    typer.echo(f"Chat em http://{host}:{port}  (usuários: {', '.join(auth.users())})")
+    people = sorted({*auth.users(), *auth.tailscale_users().values()})
+    typer.echo(f"Chat em http://{host}:{port}  (usuários: {', '.join(people)})")
     uvicorn.run(
         create_app(RunnerConfig(model=model), ChatLimits(max_per_hour, max_per_day)),
         host=host,
@@ -786,6 +793,39 @@ def web_token_remove(user: str) -> None:
         typer.echo(f"Usuário '{user}' não existe.", err=True)
         raise typer.Exit(1)
     typer.echo(f"Acesso de '{user}' revogado.")
+
+
+@web_ts_app.command("add")
+def web_tailscale_add(login: str, user: str) -> None:
+    """Libera uma conta do Tailscale (ex.: ana@github) como o usuário <user> do chat."""
+    from grana_mcp.web import auth
+
+    try:
+        auth.tailscale_add(login, user)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from None
+    typer.echo(f"{login.strip().lower()} -> {user.strip().lower()}")
+
+
+@web_ts_app.command("list")
+def web_tailscale_list() -> None:
+    """Contas do Tailscale liberadas."""
+    from grana_mcp.web import auth
+
+    users = auth.tailscale_users()
+    typer.echo("\n".join(f"{k} -> {v}" for k, v in users.items()) or "Nenhuma conta.")
+
+
+@web_ts_app.command("remove")
+def web_tailscale_remove(login: str) -> None:
+    """Revoga o acesso de uma conta do Tailscale."""
+    from grana_mcp.web import auth
+
+    if not auth.tailscale_remove(login):
+        typer.echo(f"Conta '{login}' não está liberada.", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"Acesso de '{login}' revogado.")
 
 
 @app.command()

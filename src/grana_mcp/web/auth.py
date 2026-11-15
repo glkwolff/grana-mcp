@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
+import ipaddress
 import json
 import re
 import secrets
+import time
 from pathlib import Path
 
 from grana_mcp import config
@@ -73,3 +76,96 @@ def verify(token: str | None) -> str | None:
         if hmac.compare_digest(stored, digest):
             found = user
     return found
+
+
+# --- Tailscale identity (no token needed inside the tailnet) ---
+
+TAILSCALE_NET = ipaddress.ip_network("100.64.0.0/10")
+_WHOIS_TTL_S = 300
+_whois_cache: dict[str, tuple[float, str | None]] = {}
+
+
+def tailscale_path() -> Path:
+    return config.config_dir() / "web_tailscale.json"
+
+
+def _load_ts() -> dict[str, str]:
+    path = tailscale_path()
+    if not path.exists():
+        return {}
+    return {str(k): str(v) for k, v in json.loads(path.read_text(encoding="utf-8")).items()}
+
+
+def _save_ts(data: dict[str, str]) -> None:
+    path = tailscale_path()
+    config.ensure_private_dir(path.parent)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    tmp.chmod(0o600)
+    tmp.replace(path)
+
+
+def tailscale_add(login: str, user: str) -> None:
+    """Map a Tailscale login (e.g. ``ana@github``) to a chat user."""
+    login, user = login.strip().lower(), user.strip().lower()
+    if "@" not in login or len(login) > 128:
+        raise ValueError("login do Tailscale no formato nome@provedor (ex.: ana@github)")
+    if not _USER_RE.match(user):
+        raise ValueError("usuário: letras minúsculas, dígitos, '-' ou '_' (máx. 32)")
+    data = _load_ts()
+    data[login] = user
+    _save_ts(data)
+    _whois_cache.clear()
+
+
+def tailscale_remove(login: str) -> bool:
+    data = _load_ts()
+    if data.pop(login.strip().lower(), None) is None:
+        return False
+    _save_ts(data)
+    _whois_cache.clear()
+    return True
+
+
+def tailscale_users() -> dict[str, str]:
+    return dict(sorted(_load_ts().items()))
+
+
+async def whois_login(ip: str, tailscale_bin: str = "tailscale") -> str | None:
+    """Tailscale login name of the peer at ``ip`` (via the local tailscaled), or None."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    if addr not in TAILSCALE_NET:
+        return None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            tailscale_bin, "whois", "--json", ip,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )  # fmt: skip
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+    except (OSError, TimeoutError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        login = json.loads(out)["UserProfile"]["LoginName"]
+    except (ValueError, KeyError, TypeError):
+        return None
+    return str(login).lower() if login else None
+
+
+async def tailscale_user(ip: str, tailscale_bin: str = "tailscale") -> str | None:
+    """Chat user for a request coming from the tailnet, using a short cache."""
+    mapping = _load_ts()
+    if not mapping:
+        return None
+    now = time.monotonic()
+    cached = _whois_cache.get(ip)
+    if cached and now - cached[0] < _WHOIS_TTL_S:
+        login = cached[1]
+    else:
+        login = await whois_login(ip, tailscale_bin)
+        _whois_cache[ip] = (now, login)
+    return mapping.get(login) if login else None

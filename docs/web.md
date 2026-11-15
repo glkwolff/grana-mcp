@@ -18,7 +18,8 @@ O Claude não escreve HTML nem código na página. O painel é feito de **dados*
 - **O agente não tem ferramentas além do grana:** `--tools ""` remove Bash, leitura/escrita de arquivos e internet; `--strict-mcp-config` carrega só o MCP grana; `--setting-sources project` numa pasta vazia ignora hooks e plugins do seu usuário.
 - **Container rootless**, sem capabilities, sistema de arquivos só leitura. Ele só enxerga o banco do grana, o `config.json` (itemIds, sem segredos) e os hashes dos tokens. **Nenhuma credencial da Pluggy entra no container.**
 - **Rede:** a porta é publicada só no IP do WireGuard. `grana-mcp web serve` recusa `0.0.0.0` fora de container.
-- **Login:** um token por pessoa (`grana-mcp web token add`), guardado só como hash. Depois de 10 tokens errados em 15 min, o IP fica bloqueado por 15 min.
+- **Login pelo Tailscale (recomendado):** `grana-mcp web tailscale add ana@github ana` libera uma conta do Tailscale. O servidor pergunta ao `tailscaled` local quem é o dono do IP 100.x que conectou (`tailscale whois`), então ninguém digita token. Cada pacote no tailnet é assinado pela chave do aparelho, e não dá para se passar por outro.
+- **Login por token (alternativa):** um token por pessoa (`grana-mcp web token add`), guardado só como hash. Depois de 10 tokens errados em 15 min, o IP fica bloqueado por 15 min.
 - **Limite de perguntas:** 30 por hora e 150 por dia por pessoa (`--max-per-hour`, `--max-per-day`), para um bug ou token vazado não esgotar a cota do Claude. Uma pergunta só começa quando a anterior terminou. Os contadores ficam em memória e zeram quando o serviço reinicia.
 - **Conta do Claude:** as perguntas usam a conta de quem gerou o `claude setup-token`, inclusive as da outra pessoa da casa.
 
