@@ -727,7 +727,7 @@ def web_serve(
     """Sobe o chat web. Escute só no IP do WireGuard (ou 127.0.0.1); nunca na internet."""
     from grana_mcp.web import auth
     from grana_mcp.web.app import create_app
-    from grana_mcp.web.claude_runner import RunnerConfig
+    from grana_mcp.web.claude_runner import RunnerConfig, find_claude
     from grana_mcp.web.limits import ChatLimits
 
     if host in ANY_INTERFACE and not allow_any_interface:
@@ -743,6 +743,9 @@ def web_serve(
             "ou grana-mcp web token add <nome>",
             err=True,
         )
+        raise typer.Exit(1)
+    if find_claude() is None:
+        typer.echo("Claude Code ('claude') não encontrado no PATH nem em ~/.local/bin.", err=True)
         raise typer.Exit(1)
     import uvicorn
 

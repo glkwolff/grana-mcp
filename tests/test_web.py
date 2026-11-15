@@ -196,6 +196,7 @@ def test_cli_web_tokens_and_serve_guards(monkeypatch: pytest.MonkeyPatch) -> Non
     assert runner.invoke(cli.app, ["web", "token", "add", "X Y"]).exit_code == 1
     calls: list[dict[str, object]] = []
     monkeypatch.setattr("uvicorn.run", lambda app, **kw: calls.append(kw))
+    monkeypatch.setattr(cr, "find_claude", lambda: "/usr/bin/claude")
     served = runner.invoke(cli.app, ["web", "serve", "--host", "10.0.0.1"])
     assert served.exit_code == 0, served.output
     assert calls[0]["host"] == "10.0.0.1"
@@ -331,3 +332,11 @@ def test_cli_web_tailscale_commands() -> None:
     assert runner.invoke(cli.app, ["web", "tailscale", "remove", "bia@github"]).exit_code == 0
     assert runner.invoke(cli.app, ["web", "tailscale", "remove", "bia@github"]).exit_code == 1
     assert "Nenhuma" in runner.invoke(cli.app, ["web", "tailscale", "list"]).output
+
+
+def test_missing_claude_binary_reports_error(tmp_path: Path) -> None:
+    cfg = cr.RunnerConfig(claude_bin=str(tmp_path / "nao-existe"), workdir=tmp_path / "w")
+    client = TestClient(create_app(cfg))
+    h = {"Authorization": f"Bearer {auth.add_user('ana')}"}
+    out = events(client.post("/api/chat", json={"message": "oi"}, headers=h).text)
+    assert out == [{"type": "error", "message": "O Claude Code não foi encontrado no servidor."}]

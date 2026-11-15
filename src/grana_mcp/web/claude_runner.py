@@ -60,9 +60,18 @@ SYSTEM_PROMPT = (
 )
 
 
+def find_claude() -> str | None:
+    """``claude`` on PATH, or the default per-user install location."""
+    found = shutil.which("claude")
+    if found:
+        return found
+    local = Path.home() / ".local" / "bin" / "claude"
+    return str(local) if local.is_file() and os.access(local, os.X_OK) else None
+
+
 @dataclass
 class RunnerConfig:
-    claude_bin: str = field(default_factory=lambda: shutil.which("claude") or "claude")
+    claude_bin: str = field(default_factory=lambda: find_claude() or "claude")
     workdir: Path = field(default_factory=lambda: config.data_dir() / "web-workdir")
     model: str | None = None
     timeout_s: int = TURN_TIMEOUT_S
@@ -154,15 +163,19 @@ async def run_turn(
     cfg: RunnerConfig, message: str, user: str, session_id: str, resume: bool
 ) -> AsyncIterator[dict[str, Any]]:
     user_mcp_config(cfg, user)
-    proc = await asyncio.create_subprocess_exec(
-        *build_command(cfg, message, user, session_id, resume),
-        cwd=cfg.workdir,
-        env=child_env(),
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-        limit=4 * 1024 * 1024,
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *build_command(cfg, message, user, session_id, resume),
+            cwd=cfg.workdir,
+            env=child_env(),
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            limit=4 * 1024 * 1024,
+        )
+    except OSError:
+        yield {"type": "error", "message": "O Claude Code não foi encontrado no servidor."}
+        return
     if proc.stdout is None:  # pragma: no cover - PIPE always gives a stream
         raise RuntimeError("no stdout from claude")
     finished = False
