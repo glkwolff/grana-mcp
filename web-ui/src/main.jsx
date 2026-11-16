@@ -1,9 +1,9 @@
 import { render } from "preact";
 import { useCallback, useEffect, useState } from "preact/hooks";
-import { api, getJSON, setToken, Unauthorized } from "./api.js";
+import { api, getJSON, saveThread, savedThread, setToken, Unauthorized } from "./api.js";
 import { Board } from "./Board.jsx";
 import { CategoryView } from "./CategoryView.jsx";
-import { Chat } from "./Chat.jsx";
+import { Chat, fromHistory } from "./Chat.jsx";
 import { Insights } from "./Insights.jsx";
 import { Kitchen } from "./Kitchen.jsx";
 import { Memory } from "./Memory.jsx";
@@ -65,6 +65,8 @@ function App() {
   const [board, setBoard] = useState(null);
   const [boardError, setBoardError] = useState("");
   const [messages, setMessages] = useState([]);
+  const [thread, setThreadState] = useState(savedThread);
+  const setThread = useCallback((id) => { saveThread(id); setThreadState(id); }, []);
   const [pending, setPending] = useState(null);
   const [period, setPeriod] = useState("this_month");
   const [detail, setDetail] = useState(null); // {name, period} of the open category
@@ -77,7 +79,10 @@ function App() {
     return () => removeEventListener("popstate", onPop);
   }, []);
 
-  const logout = useCallback((msg = "") => { setToken(null); setUser(null); setAuthError(msg); setNeedLogin(true); }, []);
+  const logout = useCallback((msg = "") => {
+    setToken(null); setUser(null); setAuthError(msg); setNeedLogin(true);
+    saveThread(null); setThreadState(null); setMessages([]); // the next person sees their own
+  }, []);
 
   const loadBoard = useCallback(async () => {
     try { setBoard(await getJSON("/api/board")); setBoardError(""); }
@@ -89,6 +94,8 @@ function App() {
       const me = await getJSON("/api/me");
       setUser(me.user); setNeedLogin(false); setAuthError("");
       loadBoard();
+      const open = savedThread(); // reopen the last conversation (survives reloads and restarts)
+      if (open) getJSON(`/api/chats/${encodeURIComponent(open)}`).then((t) => setMessages(fromHistory(t.messages, t.running))).catch(() => setThread(null));
       if (startCategory) { history.pushState({ cat: startCategory }, ""); setDetail({ name: startCategory, period: "this_month" }); }
     } catch (err) { logout(err instanceof Unauthorized ? "" : err.message); }
   }, [loadBoard, logout]);
@@ -124,7 +131,7 @@ function App() {
         <div class="brand"><span class="dot" />grana</div>
         <span class="muted small who">{user}</span>
         {tab === "chat" && messages.length > 0 && (
-          <button class="ghost" onClick={async () => { try { await api("/api/new", { method: "POST" }); } catch { /* ignore */ } setMessages([]); }}>Nova conversa</button>
+          <button class="ghost" onClick={async () => { try { await api("/api/new", { method: "POST" }); } catch { /* ignore */ } setThread(null); setMessages([]); }}>Nova conversa</button>
         )}
         <button class="ghost" onClick={() => logout()} title="Sair">Sair</button>
       </header>
@@ -153,6 +160,8 @@ function App() {
           <Chat
             messages={messages}
             setMessages={setMessages}
+            thread={thread}
+            setThread={setThread}
             pending={pending}
             onDone={() => { loadBoard(); setRefresh((r) => r + 1); }}
             onUnauthorized={unauthorized}

@@ -157,12 +157,13 @@ def register(server: MCPServer, k: KitchenTools) -> None:
 
     @server.tool(
         annotations=_NET,
-        description="Lojas de comida perto de casa: supermercado, atacado, hortifrúti, açougue, "
-        "padaria, feira (discover=true busca no OpenStreetMap; precisa da localização). Os "
-        "favoritos são onde a lista de compras procura preço.",
+        description="Lojas de comida perto de casa já conhecidas (supermercado, atacado, "
+        "hortifrúti, açougue, padaria, feira), favoritos primeiro. discover=true busca no "
+        "OpenStreetMap só se a lista estiver vazia ou tiver mais de 30 dias (pode levar minutos); "
+        "refresh=true força buscar de novo: só quando a pessoa pedir.",
     )
-    def markets(discover: bool = False) -> dict[str, Any]:
-        return _safe(lambda: k.markets(discover))
+    def markets(discover: bool = False, refresh: bool = False) -> dict[str, Any]:
+        return _safe(lambda: k.markets(discover, refresh))
 
     @server.tool(
         annotations=_RW,
@@ -178,7 +179,8 @@ def register(server: MCPServer, k: KitchenTools) -> None:
         "('arroz', 'peito frango'); price em reais; market: nome do mercado (vira favorito; se "
         "não existir, é criado); qty+unit (g, kg, ml, l, un, dz) = tamanho do pacote, ex. 5 kg; "
         "sem qty e com unit kg/l = preço por kg/l (granel); product: marca/descrição opcional; "
-        "day AAAA-MM-DD (padrão hoje). Use sempre que alguém citar um preço." + NOTE,
+        "day AAAA-MM-DD (padrão hoje). Preço só vale no dia em que foi visto. Use sempre que "
+        "alguém citar um preço." + NOTE,
     )
     def note_price(
         item: str,

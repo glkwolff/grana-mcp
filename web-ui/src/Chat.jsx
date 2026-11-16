@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { api, streamChat, Unauthorized } from "./api.js";
+import { api, getJSON, streamChat, Unauthorized } from "./api.js";
 import { Markdown } from "./markdown.jsx";
 import { enablePush } from "./Notify.jsx";
+import { lookupPrices, summary } from "./phonePrices.js";
 
 const TOOL_LABELS = {
   kitchen_status: "olhando a cozinha",
@@ -18,6 +19,7 @@ const TOOL_LABELS = {
   note_price: "anotando o preço",
   request_location: "pedindo a localização ao celular",
   request_notifications: "preparando as notificações",
+  request_prices: "pedindo os preços ao celular",
   household_context: "lendo o retrato da casa",
   overview: "montando a visão geral",
   explain_category: "olhando a categoria",
@@ -50,7 +52,7 @@ const SUGGESTIONS = [
 ];
 
 // Tools that ask this phone to do something; the app runs them when the answer ends.
-const DEVICE = { request_location: "location", request_notifications: "push" };
+const DEVICE = { request_location: "location", request_notifications: "push", request_prices: "prices" };
 
 function locate() {
   return new Promise((resolve, reject) => {
@@ -77,6 +79,25 @@ const friendly = (err) => (err instanceof TypeError
 
 const kTok = (n) => (n >= 1000 ? `${(n / 1000).toLocaleString("pt-BR", { maximumFractionDigits: 1 })} mil` : `${n}`);
 
+/** Saved messages (/api/chats/<id>) -> what the log shows. */
+export function fromHistory(saved, running = false) {
+  const out = saved.map((m, i) => (m.role === "me"
+    ? { role: "me", text: m.text }
+    : { role: "bot", id: `h${i}-${Date.now()}`, text: m.text, error: m.error, meta: m.meta ? usageLine(m.meta.usage, m.meta.tools) : null }));
+  if (running) out.push({ role: "bot", id: `w${Date.now()}`, text: "", status: "ainda respondendo…", waiting: true });
+  return out;
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+const when = (iso) => {
+  const d = new Date(iso);
+  const today = new Date();
+  return d.toDateString() === today.toDateString()
+    ? d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })
+    : d.toLocaleDateString("pt-BR", { day: "2-digit", month: "short" });
+};
+
 /** "2 consultas · 14 mil tokens (12 mil do cache)" under each answer. */
 function usageLine(u, tools) {
   if (!u) return null;
@@ -87,8 +108,11 @@ function usageLine(u, tools) {
   return `${q}${kTok(total)} tokens (${kTok(cached)} do cache)`;
 }
 
-export function Chat({ messages, setMessages, pending, onDone, onUnauthorized }) {
+export function Chat({ messages, setMessages, thread, setThread, pending, onDone, onUnauthorized }) {
   const [text, setText] = useState("");
+  const [list, setList] = useState(null); // past conversations, when open
+  const threadRef = useRef(thread);
+  threadRef.current = thread;
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const stick = useRef(true); // follow new text only while the reader is at the bottom
@@ -128,6 +152,17 @@ export function Chat({ messages, setMessages, pending, onDone, onUnauthorized })
         if (e instanceof Unauthorized) return onUnauthorized();
         set({ kind, state: "failed", note: e.message });
       }
+    } else if (kind === "prices") {
+      set({ kind, state: "busy", note: "buscando preços de hoje…" });
+      try {
+        const r = await lookupPrices((p) => set({ kind, state: "busy", note: `buscando preços de hoje… ${p.done} de ${p.total || "?"}` }));
+        set({ kind, state: "done", note: summary(r) });
+        onDone(true);
+        ask(`${summary(r)} Pode montar a lista de compras com os preços de hoje.`);
+      } catch (e) {
+        if (e instanceof Unauthorized) return onUnauthorized();
+        set({ kind, state: "failed", note: e.message });
+      }
     } else if (kind === "push") {
       set({ kind, state: "busy" });
       try {
@@ -150,8 +185,9 @@ export function Chat({ messages, setMessages, pending, onDone, onUnauthorized })
     const device = new Set();
     scroll(true);
     try {
-      await streamChat(q, (ev) => {
-        if (ev.type === "text") { patch((x) => ({ text: x.text + ev.text })); scroll(); }
+      await streamChat(q, threadRef.current, (ev) => {
+        if (ev.type === "thread") { threadRef.current = ev.id; setThread(ev.id); }
+        else if (ev.type === "text") { patch((x) => ({ text: x.text + ev.text })); scroll(); }
         else if (ev.type === "tool") {
           tools += 1;
           if (DEVICE[ev.name]) device.add(DEVICE[ev.name]);
@@ -163,7 +199,12 @@ export function Chat({ messages, setMessages, pending, onDone, onUnauthorized })
       patch((x) => ({ status: null, text: x.text || (x.error ? "" : "(sem resposta)") }));
     } catch (err) {
       if (err instanceof Unauthorized) { setMessages((m) => m.filter((x) => x.id !== id)); onUnauthorized(); }
-      else patch(() => ({ error: friendly(err), status: null }));
+      else if (/conversa não encontrada/.test(err.message)) { setThread(null); patch(() => ({ error: "Essa conversa foi apagada. Mande de novo para começar outra.", status: null })); }
+      else if (err instanceof TypeError && threadRef.current) {
+        // The phone dropped the connection; the server keeps going and saves the answer.
+        patch(() => ({ status: "a conexão caiu; buscando a resposta…" }));
+        await waitAnswer(id, threadRef.current);
+      } else patch(() => ({ error: friendly(err), status: null }));
     } finally {
       busyRef.current = false;
       setBusy(false);
@@ -172,12 +213,56 @@ export function Chat({ messages, setMessages, pending, onDone, onUnauthorized })
     }
     // Location prompts right away; notifications need a tap (iPhone rule), so show a button.
     if (device.has("location")) runDevice(id, "location");
+    else if (device.has("prices")) runDevice(id, "prices"); // after the location, if both
     if (device.has("push")) patchMsg(id, () => ({ action: { kind: "push", state: "ask" } }));
   }
 
   useEffect(() => {
     if (pending) { ask(pending.text); }
   }, [pending]);
+
+  /** Poll the saved thread until the server finishes, then show its last answer. */
+  async function waitAnswer(id, tid) {
+    const patch = (fn) => patchMsg(id, fn);
+    for (let i = 0; i < 100; i++) {
+      await sleep(3000);
+      let t;
+      try { t = await getJSON(`/api/chats/${encodeURIComponent(tid)}`); }
+      catch (e) { if (e instanceof Unauthorized) return onUnauthorized(); continue; }
+      if (t.running) continue;
+      const last = [...t.messages].reverse().find((m) => m.role === "bot");
+      if (last) patch(() => ({ text: last.text, error: last.error, status: null, waiting: false, meta: last.meta ? usageLine(last.meta.usage, last.meta.tools) : null }));
+      else patch(() => ({ status: null, waiting: false, error: friendly(new TypeError()) }));
+      onDone(true); scroll();
+      return;
+    }
+    patch(() => ({ status: null, waiting: false, error: "A resposta está demorando demais. Abra a conversa de novo daqui a pouco." }));
+  }
+
+  // A conversation reopened while its answer was still being written.
+  useEffect(() => {
+    const w = messages.find((m) => m.waiting && !m.polling);
+    if (!w || !thread || busyRef.current) return;
+    patchMsg(w.id, () => ({ polling: true }));
+    busyRef.current = true; setBusy(true);
+    waitAnswer(w.id, thread).finally(() => { busyRef.current = false; setBusy(false); });
+  }, [messages, thread]);
+
+  async function openList() {
+    try { setList((await getJSON("/api/chats")).threads); }
+    catch (e) { if (e instanceof Unauthorized) onUnauthorized(); }
+  }
+  async function openThread(id) {
+    try {
+      const t = await getJSON(`/api/chats/${encodeURIComponent(id)}`);
+      setThread(id); setMessages(fromHistory(t.messages, t.running)); setList(null); scroll(true);
+    } catch (e) { if (e instanceof Unauthorized) onUnauthorized(); }
+  }
+  async function removeThread(id) {
+    await api(`/api/chats/${encodeURIComponent(id)}/delete`, { method: "POST" }).catch(() => {});
+    if (id === threadRef.current) { setThread(null); setMessages([]); }
+    setList((l) => (l || []).filter((t) => t.id !== id));
+  }
 
   function submit(e) {
     e.preventDefault();
@@ -189,7 +274,9 @@ export function Chat({ messages, setMessages, pending, onDone, onUnauthorized })
 
   return (
     <div class="chat">
-      <div class="log" aria-live="polite">
+      {list && <History items={list} current={thread} onOpen={openThread} onDelete={removeThread} onClose={() => setList(null)} />}
+      <div class={list ? "log hidden" : "log"} aria-live="polite">
+        <button class="link history-link" onClick={openList} disabled={busy}>Conversas anteriores</button>
         {messages.length === 0 && (
           <div class="chat-empty">
             <h2>Pergunte sobre o dinheiro da casa</h2>
@@ -233,9 +320,9 @@ export function Chat({ messages, setMessages, pending, onDone, onUnauthorized })
 }
 
 function DeviceAction({ a, onRun }) {
-  const label = a.kind === "location" ? "localização" : "notificações";
-  if (a.state === "busy") return <div class="status">{a.kind === "location" ? "pedindo a localização…" : "ativando…"}</div>;
-  if (a.state === "done") return <div class="device ok">✓ {label === "localização" ? "Localização salva" : "Notificações ativadas"}</div>;
+  const DONE = { location: "Localização salva", push: "Notificações ativadas", prices: "Preços buscados" };
+  if (a.state === "busy") return <div class="status">{a.note || (a.kind === "location" ? "pedindo a localização…" : "ativando…")}</div>;
+  if (a.state === "done") return <div class="device ok">✓ {DONE[a.kind]}{a.kind === "prices" && a.note ? <span class="muted small"> · {a.note}</span> : null}</div>;
   return (
     <div class="device">
       {a.note && <p class="small">{a.note}</p>}
@@ -243,5 +330,32 @@ function DeviceAction({ a, onRun }) {
         {a.kind === "location" ? "Tentar de novo" : a.state === "failed" ? "Tentar de novo" : "Ativar notificações"}
       </button>
     </div>
+  );
+}
+
+function History({ items, current, onOpen, onDelete, onClose }) {
+  const [confirm, setConfirm] = useState(null);
+  return (
+    <section class="card history">
+      <header class="card-head">
+        <h2>Conversas</h2>
+        <button class="link" onClick={onClose}>voltar</button>
+      </header>
+      {items.length === 0 && <p class="empty-hint">Nenhuma conversa salva ainda.</p>}
+      <ul class="threads">
+        {items.map((t) => (
+          <li key={t.id} class={t.id === current ? "on" : ""}>
+            <button class="thread-open" onClick={() => onOpen(t.id)}>
+              <span class="tx-desc">{t.title}</span>
+              <span class="muted small">{when(t.updated_at)} · {t.messages} mensagens</span>
+            </button>
+            {confirm === t.id
+              ? <button class="link danger" onClick={() => onDelete(t.id)}>apagar mesmo</button>
+              : <button class="link" aria-label={`Apagar ${t.title}`} onClick={() => setConfirm(t.id)}>apagar</button>}
+          </li>
+        ))}
+      </ul>
+      <p class="muted small">Cada pessoa vê só as próprias conversas. As 100 mais recentes ficam guardadas.</p>
+    </section>
   );
 }

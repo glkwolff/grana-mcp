@@ -283,3 +283,12 @@ code { font: .9em ui-monospace, SFMono-Regular, Menlo, monospace; background: va
 .token-login form { display: flex; gap: 8px; margin-top: 8px; }
 
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+
+.history-link { align-self: center; font-size: 13px; }
+.log.hidden { display: none; }
+.history .threads { list-style: none; margin: 0 0 8px; padding: 0; }
+.history .threads li { display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--line); }
+.history .threads li.on .tx-desc { color: var(--accent); }
+.history .thread-open { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 10px 0; background: none; border: 0; color: var(--ink); font: inherit; text-align: left; }
+.history .thread-open .tx-desc { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.link.danger { color: var(--over); }

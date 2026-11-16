@@ -10,6 +10,14 @@ export function setToken(t) {
 
 export class Unauthorized extends Error {}
 
+const THREAD = "grana-thread";
+export function savedThread() {
+  try { return localStorage.getItem(THREAD); } catch { return null; }
+}
+export function saveThread(id) {
+  try { id ? localStorage.setItem(THREAD, id) : localStorage.removeItem(THREAD); } catch { /* private mode */ }
+}
+
 export async function api(path, opts = {}) {
   const token = getToken();
   const res = await fetch(path, {
@@ -20,19 +28,32 @@ export async function api(path, opts = {}) {
   return res;
 }
 
+const RESTARTING = new Set([502, 504]); // 503 is the app itself (e.g. no database yet)
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** GET JSON. While the server restarts (an update takes ~40 s) the proxy answers 502:
+ * retry for about a minute before giving up. */
 export async function getJSON(path) {
-  const res = await api(path);
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error || `erro ${res.status}`);
-  return body;
+  for (let attempt = 0; ; attempt++) {
+    let res;
+    try { res = await api(path); } catch (e) {
+      if (e instanceof Unauthorized || attempt >= 8) throw e;
+      await sleep(Math.min(2000 * (attempt + 1), 10000)); continue;
+    }
+    if (RESTARTING.has(res.status) && attempt < 8) { await sleep(Math.min(2000 * (attempt + 1), 10000)); continue; }
+    const body = await res.json().catch(() => ({}));
+    if (RESTARTING.has(res.status)) throw new Error("O grana está fora do ar agora. Tente de novo em alguns minutos.");
+    if (!res.ok) throw new Error(body.error || `erro ${res.status}`);
+    return body;
+  }
 }
 
 /** POST /api/chat and call onEvent for each server-sent event. */
-export async function streamChat(message, onEvent) {
+export async function streamChat(message, thread, onEvent) {
   const res = await api("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify(thread ? { message, thread } : { message }),
   });
   if (!res.ok) {
     const j = await res.json().catch(() => ({}));

@@ -19,6 +19,12 @@ TODAY = date(2026, 11, 18)  # a Wednesday
 MONDAY = "2026-11-16"
 
 
+@pytest.fixture(autouse=True)
+def clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Lookups are stamped "now"; keep that on the tests' TODAY (prices only count that day)."""
+    monkeypatch.setattr(prices, "now_utc", lambda: "2026-11-18T13:00:00+00:00")
+
+
 @pytest.fixture
 def conn() -> Iterator[sqlite3.Connection]:
     c = db.connect(config.db_path())
@@ -36,7 +42,7 @@ def store_item(
     market: str,
     *,
     gtin: str = "789",
-    sold: str = "2026-11-15T10:00:00Z",
+    sold: str = "2026-11-18T10:00:00Z",  # same day as TODAY: prices only count that day
     dist: float = 1.0,
 ) -> dict[str, Any]:
     return {
@@ -305,6 +311,11 @@ def test_markets_from_osm_and_noted_prices(conn: sqlite3.Connection) -> None:
         k.markets(discover=True)
     k.set_kitchen_rules(home_geohash="6gkzqf")
     found = k.markets(discover=True)
+    shops = k.shops
+    assert isinstance(shops, FakeShops) and len(shops.calls) == 1
+    assert "Lista do OpenStreetMap" in k.markets(discover=True)["summary"]  # reused
+    k.markets(discover=True, refresh=True)
+    assert len(shops.calls) == 2
     by_name = {m["name"]: m for m in found["markets"]}
     assert set(by_name) == {"Zamprogna", "Sacolão da Vila"}  # food shops with a name only
     dists = [m["dist_km"] for m in found["markets"]]
@@ -315,8 +326,10 @@ def test_markets_from_osm_and_noted_prices(conn: sqlite3.Connection) -> None:
     k.note_price("banana", 4.99, "Sacolão", unit="kg")  # per kg, any amount
     k.note_price("ovos", 14.0, "Zamprogna", 1, "dz")
     k.note_price("feijao", 7.49, "Mercadinho do Zé", 1, "kg")  # new market, favorited
+    k.note_price("leite", 4.99, "Zamprogna", 1, "l", day="2026-11-17")  # yesterday
     with pytest.raises(store.KitchenError):
         k.note_price("arroz", -1, "Zamprogna")
+    assert k.find_prices("leite")["offers"] == []  # only today's prices count
     offers = k.find_prices("arroz")["offers"]
     assert offers[0].startswith("Zamprogna: Tio João · 5 kg R$ 27,90 (R$ 5,58/kg")
     k.set_meal_plan(MEALS)
@@ -455,3 +468,72 @@ def test_prices_off(conn: sqlite3.Connection) -> None:
     with pytest.raises(store.KitchenError, match="indisponível"):
         k.markets(True)  # no shop source either
     assert k.find_prices("arroz")["offers"] == []
+
+
+def test_prices_looked_up_by_the_phone(conn: sqlite3.Connection, tmp_path: Any) -> None:
+    from starlette.testclient import TestClient
+
+    from grana_mcp.web import auth
+    from grana_mcp.web import claude_runner as cr
+    from grana_mcp.web.app import create_app
+
+    k = kt()  # no server-side lookups: the phone does them
+    with pytest.raises(store.KitchenError, match="localização"):
+        k.price_jobs()
+    k.set_kitchen_rules(home_geohash="6gkzqf", weekly_budget=100)
+    k.set_meal_plan(MEALS)
+    jobs = k.price_jobs()
+    assert jobs["geohash"] == "6gkzqf" and jobs["total"] == 4
+    assert {j["term"] for j in jobs["terms"]} == {"arroz", "feijao", "ovos", "banana"}
+    assert all(j["category"] is None for j in jobs["terms"])  # nothing cached yet
+
+    for term in ("arroz", "feijao", "ovos", "banana"):
+        assert k.store_phone_prices(term, 7, CATALOG[term])["ok"]
+    after = k.price_jobs()
+    assert after["terms"] == []  # all looked up today: the phone has nothing to do
+    assert prices.category_of(conn, "arroz") == 7  # next time: one request less
+    out = k.shopping_list(refresh=False)
+    assert out["estimated_total"] and "hoje" in out["prices"]
+
+    scrambled = [store_item("ARROZ", 67_87, "x" * 85), store_item("ARROZ", 15_00, "z" * 85)]
+    real_long_ids = [store_item("ARROZ TIPO 1 5KG", 25_00, "r" * 43)]  # ids vary: not scrambled
+    assert k.store_phone_prices("arroz", 7, real_long_ids)["ok"]
+    with pytest.raises(store.KitchenError, match="embaralhados"):
+        k.store_phone_prices("arroz", 7, scrambled)
+    with pytest.raises(store.KitchenError):
+        k.store_phone_prices("Arroz Tipo 1 do bom", 7, [])  # not a search key
+
+    # yesterday's lookup doesn't count today
+    tomorrow = KitchenTools(config.db_path(), lambda: date(2026, 11, 19), fetch=None)
+    assert {j["term"] for j in tomorrow.price_jobs()["terms"]} == {
+        "arroz",
+        "feijao",
+        "ovos",
+        "banana",
+    }
+    assert "estimated_total" not in tomorrow.shopping_list(refresh=False)
+
+    app = create_app(cr.RunnerConfig(claude_bin="/bin/false", workdir=tmp_path), shops=FakeShops())
+    client = TestClient(app)
+    h = {"Authorization": f"Bearer {auth.add_user('ana')}"}
+    assert client.get("/api/kitchen/prices/jobs").status_code == 401
+    jobs_web = client.get("/api/kitchen/prices/jobs", headers=h).json()
+    assert jobs_web["geohash"] == "6gkzqf" and isinstance(jobs_web["terms"], list)  # real clock
+    item = {"term": "leite", "category": 2, "items": CATALOG["arroz"][:1]}
+    assert client.post("/api/kitchen/prices/item", json=item, headers=h).json()["ok"]
+    bad = {"term": "arroz", "items": scrambled}
+    assert client.post("/api/kitchen/prices/item", json=bad, headers=h).status_code == 400
+    csp = client.get("/api/kitchen", headers=h).headers["content-security-policy"]
+    assert "connect-src 'self' https://menorpreco.notaparana.pr.gov.br;" in csp
+
+
+def test_server_lookup_stops_on_scrambled_answer(conn: sqlite3.Connection) -> None:
+    calls: list[str] = []
+
+    def scrambled(term: str, geohash: str, radius_km: int) -> list[dict[str, Any]]:
+        calls.append(term)
+        return [store_item("ARROZ", 67_87, "y" * 85)]
+
+    r = prices.refresh(conn, ["arroz", "feijao"], "6gkzqf", 2, scrambled)
+    assert calls == ["arroz"] and r.failed == ["arroz"]  # stopped at the first one
+    assert conn.execute("SELECT COUNT(*) FROM price_obs").fetchone()[0] == 0

@@ -1124,6 +1124,16 @@ def _register_device_tools(server: MCPServer) -> None:
     def request_notifications() -> str:
         return "Botão 'Ativar notificações' mostrado no chat." + after
 
+    @server.tool(
+        annotations=_RO,
+        description="Pede ao celular de quem está conversando para buscar no Menor Preço os "
+        "preços de hoje dos itens do cardápio da semana (pela internet de casa, devagar, ~3 s "
+        "por item; para sozinho se o Menor Preço recusar). Use antes de shopping_list quando "
+        "faltar preço de hoje.",
+    )
+    def request_prices() -> str:
+        return "Busca de preços iniciada no celular; o app avisa quando terminar." + after
+
 
 def build_server(
     db_path: Path | None = None,

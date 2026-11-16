@@ -24,6 +24,8 @@ from grana_mcp.store.db import now_utc
 _MAIN = "https://overpass-api.de/api/interpreter"
 OVERPASS_URLS = (  # the main instance between each mirror
     _MAIN,
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+    _MAIN,
     "https://overpass.private.coffee/api/interpreter",
     _MAIN,
     "https://overpass.kumi.systems/api/interpreter",
@@ -42,9 +44,9 @@ KINDS = {
     "farm": "produtor",
     "marketplace": "feira",
 }
-BUDGET_S = 60.0
-REQUEST_TIMEOUT_S = 25.0
-MAX_RADIUS_KM = 6
+BUDGET_S = 150.0
+REQUEST_TIMEOUT_S = 65.0  # a busy instance takes 30-60 s
+MAX_RADIUS_KM = 4
 # Where a weekly shop happens: nearest 30 kept (wholesale always: worth an Uber).
 MAIN_KINDS = {"supermercado", "atacado", "hortifrúti", "açougue", "peixaria", "feira"}
 KEEP_MAIN = 30
@@ -58,7 +60,7 @@ def query(lat: float, lon: float, radius_m: int) -> str:
     shops = "|".join(k for k in KINDS if k != "marketplace")
     around = f"(around:{radius_m},{lat:.5f},{lon:.5f})"
     return (
-        f'[out:json][timeout:25];(nwr[shop~"^({shops})$"][name]{around};'
+        f'[out:json][timeout:60];(nwr[shop~"^({shops})$"][name]{around};'
         f"nwr[amenity=marketplace][name]{around};);out center tags;"
     )
 

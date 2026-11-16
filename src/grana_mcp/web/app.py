@@ -31,7 +31,7 @@ from grana_mcp.notify import service as notify
 from grana_mcp.server import PRICES_ENV, GranaTools
 from grana_mcp.store import db
 from grana_mcp.sync import today_sp
-from grana_mcp.web import auth, usage
+from grana_mcp.web import auth, history, usage
 from grana_mcp.web.claude_runner import RunnerConfig, prepare, run_turn
 from grana_mcp.web.limits import AuthGuard, ChatLimits
 
@@ -40,7 +40,9 @@ MAX_MESSAGE = 2000
 STATIC_DIR = Path(__file__).parent / "static"  # built by web-ui/ (npm run build)
 SECURITY_HEADERS = {
     "Content-Security-Policy": (
-        "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; "
+        # Menor Preço: the phone looks prices up itself (see web-ui/src/phonePrices.js).
+        "default-src 'self'; script-src 'self'; style-src 'self'; "
+        "connect-src 'self' https://menorpreco.notaparana.pr.gov.br; "
         "img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
     ),
     "X-Content-Type-Options": "nosniff",
@@ -51,12 +53,13 @@ SECURITY_HEADERS = {
 
 @dataclass
 class Session:
-    session_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    started: bool = False
+    """Per user: one answer at a time. Threads themselves live in the database."""
+
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # Household snapshot, fixed for the whole conversation so the prompt prefix
     # stays identical turn after turn (Claude's prompt cache).
     context: str | None = None
+    thread: str | None = None  # the thread ``context`` belongs to
 
 
 @dataclass
@@ -65,6 +68,7 @@ class State:
     limits: ChatLimits = field(default_factory=ChatLimits)
     guard: AuthGuard = field(default_factory=AuthGuard)
     sessions: dict[str, Session] = field(default_factory=dict)
+    running: dict[str, asyncio.Task[None]] = field(default_factory=dict)  # thread -> turn
     prices: prices.Fetcher | None = None
     shops: places.Fetcher | None = places.overpass
 
@@ -258,6 +262,31 @@ def create_app(
     def kitchen(user: str) -> KitchenTools:
         return KitchenTools(config.db_path(), today_sp, lambda: user, state.prices, state.shops)
 
+    async def phone_prices(request: Request) -> Response:
+        """The phone looks prices up itself (its own connection, a few requests at a human
+        pace): GET what to look up today, POST each item's raw results."""
+        try:
+            user = await _user(request, state)
+        except Denied as d:
+            return d.response
+        k = kitchen(user)
+        try:
+            if request.method == "GET":
+                week = request.query_params.get("week") or None
+                data = await asyncio.to_thread(k.price_jobs, week)
+            else:
+                if int(request.headers.get("content-length") or 0) > MAX_PRICE_BODY:
+                    raise ValueError("corpo grande demais")
+                body = await request.json()
+                if not isinstance(body, dict):
+                    raise ValueError("corpo inválido")
+                data = await asyncio.to_thread(
+                    k.store_phone_prices, body.get("term"), body.get("category"), body.get("items")
+                )
+        except (KitchenError, ValueError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400, headers=SECURITY_HEADERS)
+        return JSONResponse(data, headers=SECURITY_HEADERS)
+
     async def kitchen_view(request: Request) -> Response:
         """GET: the Cozinha tab. POST /api/kitchen/<action>: small writes from the page."""
         try:
@@ -281,7 +310,7 @@ def create_app(
                 elif action == "market":
                     k.set_market(str(body.get("code", "")), bool(body.get("favorite", True)))
                 elif action == "discover":
-                    await asyncio.to_thread(k.markets, True)
+                    await asyncio.to_thread(k.markets, True, True)  # the button means "again"
                 elif action == "prices":
                     await asyncio.to_thread(k.shopping_list, None, True)
                 else:
@@ -299,8 +328,50 @@ def create_app(
             user = await _user(request, state)
         except Denied as d:
             return d.response
-        state.sessions.pop(user, None)
+        session = state.session(user)
+        session.context = session.thread = None
         return JSONResponse({"ok": True}, headers=SECURITY_HEADERS)
+
+    def _history_db() -> sqlite3.Connection | None:
+        path = config.db_path()
+        return db.connect(path) if path.exists() else None
+
+    async def chats(request: Request) -> Response:
+        """GET /api/chats: my threads. GET /api/chats/<id>: its messages.
+        POST /api/chats/<id>/delete: delete it."""
+        try:
+            user = await _user(request, state)
+        except Denied as d:
+            return d.response
+        conn = _history_db()
+        if conn is None:
+            return JSONResponse({"threads": []}, headers=SECURITY_HEADERS)
+        try:
+            tid = request.path_params.get("tid")
+            if tid is None:
+                return JSONResponse(
+                    {"threads": history.threads(conn, user)}, headers=SECURITY_HEADERS
+                )
+            row = history.get(conn, user, tid)
+            if row is None:
+                return JSONResponse(
+                    {"error": "conversa não encontrada"}, status_code=404, headers=SECURITY_HEADERS
+                )
+            if request.method == "POST":
+                history.delete(conn, user, tid)
+                session = state.session(user)
+                if session.thread == tid:
+                    session.context = session.thread = None
+                return JSONResponse({"ok": True}, headers=SECURITY_HEADERS)
+            data = {
+                "id": tid,
+                "title": row["title"],
+                "messages": history.messages(conn, tid),
+                "running": tid in state.running,  # an answer is still being written
+            }
+            return JSONResponse(data, headers=SECURITY_HEADERS)
+        finally:
+            conn.close()
 
     async def chat(request: Request) -> Response:
         try:
@@ -310,8 +381,9 @@ def create_app(
         try:
             body = await request.json()
             message = str(body.get("message", "")).strip()
+            wanted = body.get("thread")
         except (ValueError, AttributeError):
-            message = ""
+            message, wanted = "", None
         if not message or len(message) > MAX_MESSAGE:
             return JSONResponse(
                 {"error": f"mensagem vazia ou longa demais (máx. {MAX_MESSAGE})"},
@@ -325,33 +397,92 @@ def create_app(
                 status_code=409,
                 headers=SECURITY_HEADERS,
             )
+        conn = _history_db()
+        resume = False
+        if isinstance(wanted, str) and wanted:
+            row = history.get(conn, user, wanted) if conn is not None else None
+            if row is None:
+                if conn is not None:
+                    conn.close()
+                return JSONResponse(
+                    {"error": "conversa não encontrada; comece uma nova"},
+                    status_code=404,
+                    headers=SECURITY_HEADERS,
+                )
+            tid, resume = wanted, bool(row["started"])
+        else:
+            tid = history.create(conn, user, message) if conn is not None else str(uuid.uuid4())
         wait = state.limits.take(user)
         if wait:
+            if conn is not None:
+                conn.close()
             return _too_many(
                 f"limite de perguntas atingido ({state.limits.per_hour}/hora, "
                 f"{state.limits.per_day}/dia); tente de novo em {wait // 60 + 1} min",
                 wait,
             )
 
-        async def stream() -> AsyncIterator[bytes]:
-            async with session.lock:
-                resume = session.started
-                session.started = True
-                if session.context is None:
+        # The turn runs as its own task: if the phone drops the connection (iOS does when
+        # the app loses focus) the answer still finishes and lands in the history, where
+        # the page picks it up. The stream below only relays events while it is connected.
+        queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        await session.lock.acquire()
+
+        async def worker() -> None:
+            text, tools, saved, started, asked = "", 0, False, resume, False
+            try:
+                if session.thread != tid or session.context is None:
+                    session.thread = tid
                     session.context = await asyncio.to_thread(_snapshot)
-                tools = 0
-                turn = run_turn(
-                    state.runner, message, user, session.session_id, resume, session.context
-                )
-                async for event in _with_heartbeat(turn):
-                    if event is None:
-                        yield HEARTBEAT
-                        continue
-                    if event["type"] == "tool":
+                if conn is not None:
+                    history.add(conn, tid, "me", message)
+                    asked = True
+                turn = run_turn(state.runner, message, user, tid, resume, session.context)
+                async for event in turn:
+                    kind = event["type"]
+                    if not started and (kind in ("text", "tool") or "usage" in event):
+                        started = True  # Claude Code created the session: resume from now on
+                        if conn is not None:
+                            history.mark_started(conn, tid)
+                    if kind == "text":
+                        text += event["text"]
+                    elif kind == "tool":
                         tools += 1
-                    elif event["type"] in ("done", "error"):
+                        text += "\n\n" if text else ""
+                    elif kind in ("done", "error"):
                         _record_usage(user, event, tools)
-                    yield _sse(event)
+                        if conn is not None:
+                            meta = {"usage": event.get("usage"), "tools": tools}
+                            answer = event.get("result") or text
+                            error = event.get("message") if kind == "error" else None
+                            history.add(conn, tid, "bot", answer, meta, error)
+                        saved = True
+                    queue.put_nowait(event)
+            except Exception:  # never leave the user's lock taken
+                log.exception("chat turn failed")
+                queue.put_nowait({"type": "error", "message": "O assistente teve um erro interno."})
+            finally:
+                if conn is not None:
+                    if asked and not saved:
+                        history.add(conn, tid, "bot", text, None, "resposta interrompida")
+                    conn.close()
+                state.running.pop(tid, None)
+                session.lock.release()
+                queue.put_nowait(None)
+
+        state.running[tid] = asyncio.create_task(worker())
+
+        async def stream() -> AsyncIterator[bytes]:
+            yield _sse({"type": "thread", "id": tid, "title": history.title_of(message)})
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), HEARTBEAT_S)
+                except TimeoutError:
+                    yield HEARTBEAT
+                    continue
+                if event is None:
+                    return
+                yield _sse(event)
 
         return StreamingResponse(
             stream(),
@@ -365,9 +496,14 @@ def create_app(
         Route("/api/insights", insights_view),
         Route("/api/category", category_view),
         Route("/api/new", new_chat, methods=["POST"]),
+        Route("/api/chats", chats),
+        Route("/api/chats/{tid}", chats),
+        Route("/api/chats/{tid}/delete", chats, methods=["POST"]),
         Route("/api/push/key", push_key),
         Route("/api/memory", memory_view, methods=["GET", "POST"]),
         Route("/api/kitchen", kitchen_view),
+        Route("/api/kitchen/prices/jobs", phone_prices),
+        Route("/api/kitchen/prices/item", phone_prices, methods=["POST"]),
         Route("/api/kitchen/{action}", kitchen_view, methods=["POST"]),
         Route("/api/memory/delete", memory_view, methods=["POST"]),
         Route("/api/push/subscribe", push_change, methods=["POST"]),
@@ -409,40 +545,9 @@ def _record_usage(user: str, event: dict[str, Any], tools: int) -> None:
         log.warning("could not record chat usage")
 
 
-HEARTBEAT = b": ping\n\n"  # SSE comment: ignored by the page, keeps proxies and Safari awake
+MAX_PRICE_BODY = 1024 * 1024  # one item: up to 80 products
+HEARTBEAT = b": ping\n\n"  # SSE comment: ignored by the page, keeps proxies awake
 HEARTBEAT_S = 10.0
-
-
-async def _with_heartbeat(
-    events: AsyncIterator[dict[str, Any]], every: float = HEARTBEAT_S
-) -> AsyncIterator[dict[str, Any] | None]:
-    """Yield the events, plus ``None`` whenever ``every`` seconds pass without one.
-
-    While the model writes a long tool call (a whole week's menu) nothing streams for
-    a minute or more, and iPhone Safari drops an idle fetch ("Load failed").
-    """
-    it = aiter(events)
-    nxt: asyncio.Future[dict[str, Any]] | None = None
-    try:
-        while True:
-            if nxt is None:
-                nxt = asyncio.ensure_future(anext(it))
-            done, _ = await asyncio.wait({nxt}, timeout=every)
-            if not done:
-                yield None
-                continue
-            try:
-                event = nxt.result()
-            except StopAsyncIteration:
-                return
-            nxt = None
-            yield event
-    finally:
-        if nxt is not None and not nxt.done():
-            nxt.cancel()
-        aclose = getattr(it, "aclose", None)
-        if aclose is not None:
-            await aclose()
 
 
 def _sse(event: dict[str, Any]) -> bytes:

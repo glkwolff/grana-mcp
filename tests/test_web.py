@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 import stat
 import sys
-from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +30,9 @@ if msg == "falha":
     sys.exit(0)
 if msg == "mudo":
     sys.exit(0)
+if msg == "devagar":
+    import time
+    time.sleep(0.5)
 out({{"type": "stream_event", "event": {{"type": "content_block_start",
      "content_block": {{"type": "tool_use", "name": "mcp__grana__spending_summary"}}}}}})
 out({{"type": "stream_event", "event": {{"type": "content_block_delta",
@@ -165,6 +166,9 @@ def test_api_requires_token(client: TestClient) -> None:
 def test_chat_streams_and_resumes(client: TestClient) -> None:
     h = {"Authorization": f"Bearer {auth.add_user('ana')}"}
     assert client.get("/api/me", headers=h).json() == {"user": "ana"}
+    from grana_mcp.store import db as store_db
+
+    store_db.connect(config.db_path()).close()  # history needs the database
     first = events(client.post("/api/chat", json={"message": "quanto?"}, headers=h).text)
     assert {"type": "tool", "name": "spending_summary"} in first
     assert "".join(str(e["text"]) for e in first if e["type"] == "text") == "Gasto: R$ 10"
@@ -181,11 +185,30 @@ def test_chat_streams_and_resumes(client: TestClient) -> None:
     assert usage.summary(conn)[0]["questions"] == 1
     assert usage.context_tokens(first[-1]["usage"]) == 9312
     conn.close()
-    second = events(client.post("/api/chat", json={"message": "e agora?"}, headers=h).text)
-    assert second[-1]["result"] == "Gasto: R$ 10 (resume)"
+    assert first[0]["type"] == "thread" and first[0]["title"] == "quanto?"
+    tid = first[0]["id"]
+    again = {"message": "e agora?", "thread": tid}
+    second = events(client.post("/api/chat", json=again, headers=h).text)
+    assert second[0]["id"] == tid and second[-1]["result"] == "Gasto: R$ 10 (resume)"
     assert client.post("/api/new", headers=h).json() == {"ok": True}
     third = events(client.post("/api/chat", json={"message": "de novo"}, headers=h).text)
-    assert third[-1]["result"] == "Gasto: R$ 10"
+    assert third[-1]["result"] == "Gasto: R$ 10" and third[0]["id"] != tid  # new thread
+
+    # history: listed newest first, messages kept, only for their owner
+    listed = client.get("/api/chats", headers=h).json()["threads"]
+    assert [t["title"] for t in listed] == ["de novo", "quanto?"] and listed[1]["messages"] == 4
+    thread = client.get(f"/api/chats/{tid}", headers=h).json()
+    assert [m["role"] for m in thread["messages"]] == ["me", "bot", "me", "bot"]
+    assert thread["messages"][1]["text"] == "Gasto: R$ 10"
+    assert thread["messages"][1]["meta"]["tools"] == 1
+    bia = {"Authorization": f"Bearer {auth.add_user('bia')}"}
+    assert client.get(f"/api/chats/{tid}", headers=bia).status_code == 404
+    assert client.get("/api/chats", headers=bia).json()["threads"] == []
+    other = client.post("/api/chat", json={"message": "oi", "thread": tid}, headers=bia)
+    assert other.status_code == 404  # can't write into someone else's thread
+    assert client.post(f"/api/chats/{tid}/delete", headers=bia).status_code == 404
+    assert client.post(f"/api/chats/{tid}/delete", headers=h).json() == {"ok": True}
+    assert client.get(f"/api/chats/{tid}", headers=h).status_code == 404
 
 
 def test_chat_errors(client: TestClient) -> None:
@@ -240,20 +263,20 @@ def test_board_api_and_actor_config(client: TestClient, tmp_path: Path) -> None:
     assert cfg["mcpServers"]["grana"]["env"]["GRANA_CHAT_DEVICE"] == "1"
 
 
-def test_heartbeat_while_the_model_is_quiet() -> None:
-    from grana_mcp.web.app import _with_heartbeat
+def test_pings_while_the_model_is_quiet(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from grana_mcp.store import db as store_db
+    from grana_mcp.web import app as web_app
 
-    async def slow() -> AsyncIterator[dict[str, Any]]:
-        yield {"type": "text", "text": "a"}
-        await asyncio.sleep(0.05)
-        yield {"type": "done"}
-
-    async def collect() -> list[dict[str, Any] | None]:
-        return [e async for e in _with_heartbeat(slow(), every=0.01)]
-
-    out = asyncio.run(collect())
-    assert out[0] == {"type": "text", "text": "a"} and out[-1] == {"type": "done"}
-    assert None in out  # at least one ping during the pause
+    monkeypatch.setattr(web_app, "HEARTBEAT_S", 0.05)
+    store_db.connect(config.db_path()).close()
+    h = {"Authorization": f"Bearer {auth.add_user('ana')}"}
+    body = client.post("/api/chat", json={"message": "devagar"}, headers=h).text
+    assert ": ping" in body and events(body)[-1]["type"] == "done"
+    tid = events(body)[0]["id"]
+    saved = client.get(f"/api/chats/{tid}", headers=h).json()
+    assert saved["running"] is False and saved["messages"][-1]["text"].startswith("Gasto")
 
 
 # --- rate limits ---
@@ -376,7 +399,9 @@ def test_missing_claude_binary_reports_error(tmp_path: Path) -> None:
     client = TestClient(create_app(cfg))
     h = {"Authorization": f"Bearer {auth.add_user('ana')}"}
     out = events(client.post("/api/chat", json={"message": "oi"}, headers=h).text)
-    assert out == [{"type": "error", "message": "O Claude Code não foi encontrado no servidor."}]
+    assert out[1:] == [
+        {"type": "error", "message": "O Claude Code não foi encontrado no servidor."}
+    ]
 
 
 def test_dashboard_apis(client: TestClient) -> None:

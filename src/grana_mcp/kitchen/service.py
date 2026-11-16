@@ -28,9 +28,12 @@ DAYS = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"]
 MEAL_NAMES = {"cafe": "café", "almoco": "almoço", "lanche": "lanche", "jantar": "jantar"}
 STAPLES = ("arroz", "feijao", "leite", "ovos", "banana")
 PRICES_OFF = (
-    "Preços anotados pela casa (note_price), válidos por 60 dias; o Menor Preço bloqueia "
-    "acesso automatizado, então não há busca automática."
+    "Só entram preços de hoje: do Menor Preço, buscados pelo celular de vocês (botão "
+    "'buscar preços de hoje' na Cozinha, ou request_prices no chat), e os anotados no chat."
 )
+PHONE_MAX_TERMS = 40
+PHONE_MAX_ITEMS = 80
+MARKETS_FRESH_DAYS = 30
 PRICE_UNITS = {"g": ("kg", 0.001), "kg": ("kg", 1.0), "ml": ("l", 0.001), "l": ("l", 1.0),
                "un": ("un", 1.0), "dz": ("un", 12.0)}  # fmt: skip
 DISCLAIMER = (
@@ -393,8 +396,58 @@ class KitchenTools:
             "summary": f"{len(found)} preço(s) recentes para '{key}'.",
         }
 
-    def markets(self, discover: bool = False) -> dict[str, Any]:
+    def price_jobs(self, week_start: str | None = None) -> dict[str, Any]:
+        """What the phone should look up today: the week's items without a price fetched
+        today, with the cached category of each (saves a request per item)."""
+        mon = self._week(week_start)
+        today = self.today()
         with self._conn() as conn:
+            rules = store.rules(conn)
+            if rules is None or not rules["home_geohash"]:
+                raise store.KitchenError("sem localização: peça com request_location")
+            needs = store.shopping_needs(store.week(conn, mon), 1.0)
+            terms = [
+                {"term": n.search, "category": prices.category_of(conn, n.search)}
+                for n in needs
+                if not prices.fetched_today(conn, n.search, today)
+            ][:PHONE_MAX_TERMS]
+        return {
+            "geohash": rules["home_geohash"],
+            "radius_km": rules["radius_km"],
+            "terms": terms,
+            "total": len(needs),
+        }
+
+    def store_phone_prices(self, term: Any, category: Any, items: Any) -> dict[str, Any]:
+        """One item looked up by the phone: raw Menor Preço products for ``term``."""
+        if not isinstance(term, str) or not term or store.search_key(term) != term:
+            raise store.KitchenError("termo inválido")
+        if not isinstance(items, list):
+            raise store.KitchenError("items: lista de produtos")
+        rows = [i for i in items[:PHONE_MAX_ITEMS] if isinstance(i, dict)]
+        if prices.poisoned(rows):
+            raise store.KitchenError(
+                "o Menor Preço mandou dados embaralhados (proteção contra excesso de "
+                "consultas): busca parada por hoje"
+            )
+        with self._conn() as conn:
+            if isinstance(category, int) and not isinstance(category, bool) and category > 0:
+                prices.set_category(conn, term, category)
+            n = prices.store_results(conn, term, rows)
+        return {"ok": True, "term": term, "offers": n}
+
+    def markets(self, discover: bool = False, refresh: bool = False) -> dict[str, Any]:
+        cached = ""
+        with self._conn() as conn:
+            if discover and not refresh:
+                since = (self.today() - timedelta(days=MARKETS_FRESH_DAYS)).isoformat()
+                recent = conn.execute(
+                    "SELECT MAX(seen_at) FROM markets WHERE code LIKE 'osm:%' AND seen_at >= ?",
+                    (since,),
+                ).fetchone()[0]
+                if recent:  # the list barely changes: don't hit OpenStreetMap again
+                    discover = False
+                    cached = f" Lista do OpenStreetMap de {recent[8:10]}/{recent[5:7]}."
             if discover:
                 rules = store.rules(conn)
                 if not (rules and rules["home_geohash"]):
@@ -424,7 +477,7 @@ class KitchenTools:
             "note": "Lojas de comida perto de casa (OpenStreetMap; dados de terceiros). "
             "Favoritos aparecem primeiro e são onde a lista de compras procura preço.",
             "summary": f"{len(rows)} mercado(s) por perto; "
-            f"{sum(r['favorite'] for r in rows)} favorito(s).",
+            f"{sum(r['favorite'] for r in rows)} favorito(s).{cached}",
         }
 
     def note_price(

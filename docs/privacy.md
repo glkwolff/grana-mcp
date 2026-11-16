@@ -36,7 +36,7 @@ No chat web, o modelo recebe no início da conversa um resumo agregado da casa (
 
 ## Cozinha: dados de saúde
 
-Peso, altura, ano de nascimento, sexo (só para a fórmula do metabolismo), restrições e metas são **dados sensíveis** (LGPD, art. 5º, II). Ficam só no SQLite local, nunca no repositório, e aparecem no retrato da casa que o modelo recebe no chat. Para listar os mercados por perto, o grana envia ao OpenStreetMap (Overpass API) só o centro de uma área de ~1 km e um raio. Nada de peso, nome, produto ou conta. Os preços são anotados pela própria casa no chat e ficam no SQLite.
+Peso, altura, ano de nascimento, sexo (só para a fórmula do metabolismo), restrições e metas são **dados sensíveis** (LGPD, art. 5º, II). Ficam só no SQLite local, nunca no repositório, e aparecem no retrato da casa que o modelo recebe no chat. Para listar os mercados por perto, o grana envia ao OpenStreetMap (Overpass API) só o centro de uma área de ~1 km e um raio. Nada de peso, nome, produto ou conta. Os preços do Menor Preço são consultados pelo celular de vocês, que envia ao serviço só o nome genérico do produto e a mesma área de ~1 km; os resultados e os preços anotados no chat ficam no SQLite.
 
 ## Texto de terceiros é dado, não instrução
 

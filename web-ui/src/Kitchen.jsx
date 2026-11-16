@@ -6,6 +6,7 @@ import { useEffect, useState } from "preact/hooks";
 import { api, getJSON, Unauthorized } from "./api.js";
 import { WeightChart } from "./Chart.jsx";
 import { fmtDate, shortDate } from "./fmt.js";
+import { lookupPrices, summary } from "./phonePrices.js";
 
 const DAYS = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"];
 const MEALS = { cafe: "Café", almoco: "Almoço", lanche: "Lanche", jantar: "Jantar" };
@@ -24,6 +25,8 @@ export function Kitchen({ onAsk, onUnauthorized, refresh }) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState("");
   const [day, setDay] = useState(() => (new Date().getDay() + 6) % 7);
+  const [lookup, setLookup] = useState(null); // {done, total} while the phone looks prices up
+  const [lookupMsg, setLookupMsg] = useState("");
 
   const fail = (e) => (e instanceof Unauthorized ? onUnauthorized() : setError(e.message));
   useEffect(() => { getJSON("/api/kitchen").then(setData).catch(fail); }, [refresh]);
@@ -31,6 +34,14 @@ export function Kitchen({ onAsk, onUnauthorized, refresh }) {
   const act = async (action, body, label) => {
     setError(""); setBusy(label || action);
     try { setData(await post(`/api/kitchen/${action}`, body)); } catch (e) { fail(e); } finally { setBusy(""); }
+  };
+  const findPrices = async () => {
+    setError(""); setLookupMsg(""); setLookup({ done: 0, total: 0 });
+    try {
+      const r = await lookupPrices((p) => setLookup(p));
+      setLookupMsg(summary(r));
+      setData(await getJSON("/api/kitchen"));
+    } catch (e) { fail(e); } finally { setLookup(null); }
   };
   const locate = () => {
     if (!navigator.geolocation) return setError("Este navegador não informa a localização.");
@@ -143,9 +154,14 @@ export function Kitchen({ onAsk, onUnauthorized, refresh }) {
       <section class="card">
         <header class="card-head">
           <h2>Lista de compras</h2>
-          {shopping && <button class="link" onClick={() => onAsk("Quero anotar preços que vi no mercado")}>anotar preços</button>}
+          {shopping && status.rules.location_set && (
+            <button class="link" disabled={!!lookup} onClick={findPrices}>
+              {lookup ? `buscando… ${lookup.done} de ${lookup.total || "?"}` : "buscar preços de hoje"}
+            </button>
+          )}
         </header>
         {!shopping && <p class="empty-hint">Sai do cardápio da semana.</p>}
+        {lookupMsg && <p class="empty-hint">{lookupMsg}</p>}
         {shopping && <Shopping s={shopping} />}
       </section>
 
@@ -237,7 +253,7 @@ function Shopping({ s }) {
         </div>
       ))}
       {s.prices_failed > 0 && <p class="muted small">{s.prices_failed} item(ns) sem resposta da fonte de preços agora.</p>}
-      <p class="muted small">Preços anotados por vocês nos últimos 60 dias. Podem ter mudado.</p>
+      <p class="muted small">Só entram preços de hoje: do Menor Preço (buscados por este celular, devagar) e os que vocês anotarem no chat. Sem preço de hoje, o item fica sem preço.</p>
     </>
   );
 }

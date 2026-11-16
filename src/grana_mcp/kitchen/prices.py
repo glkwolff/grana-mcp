@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from itertools import combinations
 from typing import Any, Protocol
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -32,8 +33,15 @@ log = logging.getLogger(__name__)
 BASE_URL = "https://menorpreco.notaparana.pr.gov.br/api/v1"
 USER_AGENT = "grana-mcp (uso pessoal; lista de compras da casa)"
 CACHE_HOURS = 24
-FRESH_DAYS = 10  # ignore receipt prices sold longer ago than this
-NOTED_DAYS = 60  # prices the household noted down last longer
+# Prices only count on the day they were looked up (the household's call: an old price is
+# worse than none). Receipt prices: fetched today, from sales of the last few days (sales
+# made today alone would leave the morning empty). Noted prices: noted today.
+FRESH_DAYS = 7
+NOTED_DAYS = 0
+# Menor Preço's anti-bot answer: scrambled store names, the bare search word as the product
+# ("ARROZ"), fake prices and ~85-char random store ids. Real answers have full receipt
+# descriptions and ids of 20-45 chars (the length varies, so it alone is not enough).
+POISONED_CODE_LEN = 70
 LOCAL_PREFIXES = ("osm:", "manual:")  # markets not from the receipt source
 BY_WEIGHT = ("por kg", "por l")  # suffix of a noted price that is per kg/l, any amount
 CONNECT_TIMEOUT_S = 3.0
@@ -269,7 +277,12 @@ def refresh(
             result.failed.append(term)
             continue
         try:
-            store_results(conn, term, fetch(term, geohash, radius_km))
+            items = fetch(term, geohash, radius_km)
+            if poisoned(items):  # anti-bot answer: never store it, stop asking for now
+                log.warning("price source sent scrambled data; stopping")
+                result.failed.append(term)
+                break
+            store_results(conn, term, items)
             result.fetched += 1
         except (httpx.HTTPError, ValueError) as exc:
             log.warning("price fetch failed for a term: %s", type(exc).__name__)
@@ -285,22 +298,23 @@ def offers(conn: sqlite3.Connection, term: str, unit: str, today: date) -> list[
     favorites = conn.execute("SELECT COUNT(*) FROM markets WHERE favorite = 1").fetchone()[0]
     since = (today - timedelta(days=FRESH_DAYS)).isoformat()
     since_noted = (today - timedelta(days=NOTED_DAYS)).isoformat()
+    fetched_since = day_start_utc(today)
     rows = conn.execute(
-        "SELECT o.market, m.name, o.descr, o.cents, o.size, o.unit, o.sold_at, o.gtin "
-        "FROM price_obs o JOIN markets m ON m.code = o.market "
+        "SELECT o.market, m.name, o.descr, o.cents, o.size, o.unit, o.sold_at, o.gtin, "
+        "o.fetched_at FROM price_obs o JOIN markets m ON m.code = o.market "
         "WHERE o.search = ? AND o.sold_at >= ? AND (? = 0 OR m.favorite = 1)",
-        (term, since_noted, favorites),
+        (term, min(since, since_noted), favorites),
     ).fetchall()
     out = []
     for r in rows:
         noted = str(r[0]).startswith(LOCAL_PREFIXES)
         if noted:
-            if r[5] != unit or not r[4]:
+            if r[6] < since_noted or r[5] != unit or not r[4]:
                 continue
             loose = str(r[2]).endswith(BY_WEIGHT)
             out.append(Offer(r[0], r[1], r[2], r[3], float(r[4]), r[5], r[6], loose))
             continue
-        if r[6] < since or not relevant(r[2], term):
+        if r[6] < since or r[8] < fetched_since or not relevant(r[2], term):
             continue
         size, u = r[4], r[5]
         if u is None and unit == "un" and (favorites or r[7]):
@@ -311,6 +325,41 @@ def offers(conn: sqlite3.Connection, term: str, unit: str, today: date) -> list[
             continue  # without favorites: barcoded or sold-by-weight only (keeps restaurants out)
         out.append(Offer(r[0], r[1], r[2], r[3], float(size), u, r[6], is_loose(r[2])))
     return out
+
+
+def day_start_utc(day: date) -> str:
+    """Midnight of ``day`` in São Paulo, as a UTC ISO string (how fetched_at is stored)."""
+    start = datetime.combine(day, datetime.min.time(), tzinfo=ZoneInfo("America/Sao_Paulo"))
+    return start.astimezone(UTC).isoformat(timespec="seconds")
+
+
+def poisoned(items: list[dict[str, Any]]) -> bool:
+    """Most items with a one-word description or a very long random store id."""
+    if not items:
+        return False
+    codes = [str((i.get("estabelecimento") or {}).get("codigo") or "") for i in items]
+    bare = sum(len(str(i.get("desc") or "").split()) <= 1 for i in items)
+    long = sum(len(c) >= POISONED_CODE_LEN for c in codes)
+    return max(bare, long) * 2 > len(items)
+
+
+def category_of(conn: sqlite3.Connection, term: str) -> int | None:
+    row = conn.execute("SELECT category FROM price_category WHERE search = ?", (term,)).fetchone()
+    return int(row[0]) if row else None
+
+
+def set_category(conn: sqlite3.Connection, term: str, category: int) -> None:
+    conn.execute(
+        "INSERT INTO price_category (search, category, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT (search) DO UPDATE SET category = excluded.category, "
+        "updated_at = excluded.updated_at",
+        (term, category, now_utc()),
+    )
+
+
+def fetched_today(conn: sqlite3.Connection, term: str, today: date) -> bool:
+    row = conn.execute("SELECT fetched_at FROM price_fetch WHERE search = ?", (term,)).fetchone()
+    return bool(row) and str(row[0]) >= day_start_utc(today)
 
 
 def note(
