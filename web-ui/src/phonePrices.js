@@ -54,20 +54,37 @@ const STOPPED = "O Menor Preço recusou mais consultas por agora (mandou dados e
 
 /** Look up today's prices. One run at a time; onProgress({done, total, term}). */
 export function lookupPrices(onProgress) {
-  if (!running) running = run(onProgress).finally(() => { running = null; });
+  if (!running) running = run(onProgress).then(report, async (e) => {
+    await report({ total: 0, ok: 0, offers: 0, failed: [], stopped: e.message || "erro" }).catch(() => {});
+    throw e;
+  }).finally(() => { running = null; });
   return running;
+}
+
+// Tell the server how it ended (counts and stop reason only), so the assistant can see it.
+async function report(r) {
+  try {
+    await api("/api/kitchen/prices/done", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ total: r.total, ok: r.ok, offers: r.offers, failed: r.failed.length, stopped: r.stopped || null }),
+    });
+  } catch { /* best effort */ }
+  return r;
 }
 
 async function run(onProgress) {
   const jobs = await getJSON("/api/kitchen/prices/jobs");
   const total = jobs.terms.length;
+  if (!total) return { done: 0, ok: 0, total, offers: 0, failed: [], menu: jobs.menu };
   let done = 0, ok = 0, offers = 0, fails = 0;
   const failed = [];
   onProgress?.({ done, total });
-  for (const { term, category } of jobs.terms) {
+  for (const { term, query, category } of jobs.terms) {
     try {
       let cat = category;
-      const where = { local: jobs.geohash, termo: term, raio: jobs.radius_km };
+      // query: the term plus the house's brand ("arroz tio joao"); the site searches both
+      const where = { local: jobs.geohash, termo: query || term, raio: jobs.radius_km };
       if (cat == null) cat = dominant((await mp("categorias", where)).categorias);
       const params = { ...where, data: -1, offset: 0, ordem: 0 };
       if (cat) params.categoria = cat;
@@ -95,7 +112,7 @@ async function run(onProgress) {
 
 /** One line for the chat or the page. */
 export function summary(r) {
-  if (!r.total) return "Já tenho os preços de hoje de todos os itens da semana.";
+  if (!r.total) return r.menu === false ? "Não há cardápio desta semana nem da próxima para buscar preços." : "Já tenho os preços de hoje de todos os itens da semana.";
   const base = `Busquei ${r.ok} de ${r.total} itens no Menor Preço (${r.offers} preços).`;
   return [base, r.failed.length ? `Sem resposta: ${r.failed.join(", ")}.` : "", r.stopped || ""].filter(Boolean).join(" ");
 }

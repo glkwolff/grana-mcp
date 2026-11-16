@@ -280,9 +280,15 @@ def create_app(
                 body = await request.json()
                 if not isinstance(body, dict):
                     raise ValueError("corpo inválido")
-                data = await asyncio.to_thread(
-                    k.store_phone_prices, body.get("term"), body.get("category"), body.get("items")
-                )
+                if request.url.path.endswith("/done"):
+                    data = await asyncio.to_thread(k.log_lookup, body)
+                else:
+                    data = await asyncio.to_thread(
+                        k.store_phone_prices,
+                        body.get("term"),
+                        body.get("category"),
+                        body.get("items"),
+                    )
         except (KitchenError, ValueError) as exc:
             return JSONResponse({"error": str(exc)}, status_code=400, headers=SECURITY_HEADERS)
         return JSONResponse(data, headers=SECURITY_HEADERS)
@@ -504,6 +510,7 @@ def create_app(
         Route("/api/kitchen", kitchen_view),
         Route("/api/kitchen/prices/jobs", phone_prices),
         Route("/api/kitchen/prices/item", phone_prices, methods=["POST"]),
+        Route("/api/kitchen/prices/done", phone_prices, methods=["POST"]),
         Route("/api/kitchen/{action}", kitchen_view, methods=["POST"]),
         Route("/api/memory/delete", memory_view, methods=["POST"]),
         Route("/api/push/subscribe", push_change, methods=["POST"]),

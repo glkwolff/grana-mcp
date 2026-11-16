@@ -167,11 +167,36 @@ def register(server: MCPServer, k: KitchenTools) -> None:
 
     @server.tool(
         annotations=_RW,
-        description="Marca (favorite=true) ou desmarca um mercado como favorito, por nome ou "
-        "código." + NOTE,
+        description="Marca (favorite=true) ou desmarca um mercado onde a casa compra. Use um "
+        "nome por chamada, como a pessoa disse, com o bairro quando ela citar ('Condor Boa "
+        "Vista', 'Ítalo', 'Festval Kennedy'): vale para toda loja das notas com essas palavras "
+        "no nome ou no bairro. A lista de compras e find_prices comparam preços SÓ entre esses "
+        "mercados. Chame sempre que alguém disser onde compra; não basta guardar na memória.",
     )
     def set_market(market: str, favorite: bool = True) -> dict[str, Any]:
         return _safe(lambda: k.set_market(market, favorite))
+
+    @server.tool(
+        annotations=_RW,
+        description="Quanto pesa (grams) ou quanto tem (ml) UMA unidade de um item: limão "
+        "100 g, cebola 150 g, pé de alface 300 g, caixa de leite 1000 ml. Fica salvo e serve "
+        "para comparar preço quando a receita conta unidades e o mercado vende por kg/l (ou o "
+        "contrário). Chame quando shopping_list trouxer needs_conversion, com sua melhor "
+        "estimativa de peso médio, e quando a pessoa corrigir um peso.",
+    )
+    def set_unit_weight(
+        item: str, grams: float | None = None, ml: float | None = None
+    ) -> dict[str, Any]:
+        return _safe(lambda: k.set_unit_weight(item, grams, ml))
+
+    @server.tool(
+        annotations=_RW,
+        description="Marca que a casa compra de um item ('arroz' -> 'Tio João'); brand vazio "
+        "volta a aceitar qualquer marca. A busca de preços procura essa marca e a lista de "
+        "compras usa só ela quando houver preço. Chame quando alguém disser a marca que usa.",
+    )
+    def set_brand(item: str, brand: str | None = None) -> dict[str, Any]:
+        return _safe(lambda: k.set_brand(item, brand))
 
     @server.tool(
         annotations=_RW,

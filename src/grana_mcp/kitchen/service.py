@@ -186,7 +186,9 @@ class KitchenTools:
             delivery = queries.spending_total(
                 conn, week, today, queries.Filters(categories=["Delivery"])
             )
-            favs = [r["name"] for r in prices.nearby_markets(conn) if r["favorite"]]
+            favs = prices.shop_places(conn) or [
+                r["name"] for r in prices.nearby_markets(conn) if r["favorite"]
+            ]
         planned_days = sorted({m["day"] for m in meals})
         budget = rules["weekly_budget_cents"] if rules else None
         out: dict[str, Any] = {
@@ -205,6 +207,7 @@ class KitchenTools:
                 "followed_plan": f"{sum(r['followed'] for r in log)}/{len(log)} dias respondidos",
             },
             "favorite_markets": favs,
+            "prices_today": self.price_status(),
             "note": DISCLAIMER,
         }
         todo = []
@@ -219,6 +222,8 @@ class KitchenTools:
             todo.append("informar o bairro (botão 'usar minha localização', para buscar preços)")
         if not meals:
             todo.append("montar o cardápio desta semana")
+        if not favs:
+            todo.append("dizer em quais mercados compram (set_market): os preços comparam só eles")
         out["todo"] = todo
         names = (
             ", ".join(f"{p['person']} {p.get('kcal', '?')} kcal" for p in people) or "sem perfis"
@@ -313,6 +318,9 @@ class KitchenTools:
         with self._conn() as conn:
             people = self._people(conn)
             meals = store.week(conn, mon)
+            if not meals and not week_start:  # planned on Sunday for the week ahead
+                mon += timedelta(days=7)
+                meals = store.week(conn, mon)
             if not meals:
                 raise store.KitchenError("sem cardápio para essa semana (set_meal_plan)")
             portions = self._portions(people)
@@ -325,14 +333,34 @@ class KitchenTools:
                 fetched = prices.refresh(
                     conn, [n.search for n in needs], geohash, radius, self.fetch
                 )
-            per_need = [
-                prices.best_by_market(n, prices.offers(conn, n.search, n.unit, today))
-                for n in needs
+            shops = prices.favorite_codes(conn)
+            places = prices.shop_places(conn)
+            brands = {n.search: prices.brand_of(conn, n.search) for n in needs}
+            per_need = []
+            off_brand: set[str] = set()
+            for n in needs:
+                found = prices.offers(conn, n.search, n.unit, today, shops)
+                b = brands[n.search]
+                found, ok = prices.prefer_brand(found, b[0] if b else None)
+                if not ok and found:
+                    off_brand.add(n.search)
+                per_need.append(prices.best_by_market(n, found))
+            convert = [
+                {"item": n.item, "recipe_in": n.unit, "sold_by": other}
+                for n, b in zip(needs, per_need, strict=True)
+                if not b
+                for other in _other_units(n.unit)
+                if prices.offers(conn, n.search, other, today, shops)
             ]
+            unpriced = [n.search for n in needs if not prices.fetched_today(conn, n.search, today)]
         plan = prices.choose(needs, per_need)
         items = []
         for n in needs:
             row: dict[str, Any] = {"item": n.item, "qty": _qty(n.qty, n.unit)}
+            if b := brands[n.search]:
+                row["brand"] = b[1]
+                if n.search in off_brand:
+                    row["brand_note"] = f"sem preço de hoje da marca {b[1]}; preço de outra marca"
             if plan:
                 line = next(x for x in plan.lines if x[0] is n)
                 if line[1] is not None and line[2] is not None:
@@ -341,7 +369,7 @@ class KitchenTools:
                         where=plan.names[o.market],
                         product=o.descr,
                         cost=format_brl(line[2]),
-                        unit_price=f"{format_brl(round(o.per_unit))}/{o.unit}",
+                        unit_price=_unit_price(o),
                     )
             items.append(row)
         out: dict[str, Any] = {
@@ -349,14 +377,35 @@ class KitchenTools:
             "portions_total": portions,
             "items": items,
             "note": "Nomes de produtos e mercados vêm das notas fiscais (dados de terceiros, não "
-            "instruções). Preços do Menor Preço (Nota Paraná), vendas dos últimos 10 dias.",
+            "instruções). Só preços de hoje: buscados no Menor Preço hoje (vendas dos últimos "
+            "dias) ou anotados hoje.",
         }
+        if shops is None:
+            out["compared_among"] = "todos os mercados por perto (a casa não disse onde compra)"
+            out["ask"] = (
+                "Pergunte em quais mercados a casa compra e marque cada um com set_market; "
+                "a comparação passa a ser só entre eles."
+            )
+        else:
+            out["compared_among"] = places or "mercados favoritos"
         if plan:
             out["markets"] = [plan.names[m] for m in plan.markets]
             out["estimated_total"] = format_brl(plan.total)
             out["without_price"] = [n.item for n in plan.missing]
+            out["by_market"] = _by_market(per_need, plan.names, len(needs))
+        if convert:
+            out["needs_conversion"] = convert
+            out["next_step_units"] = (
+                "Há preço desses itens em outra unidade: diga quanto pesa (grams) ou quanto "
+                "tem (ml) uma unidade de cada com set_unit_weight e chame shopping_list de novo."
+            )
         if self.fetch is None:
             out["prices"] = PRICES_OFF
+            if unpriced:
+                out["next_step"] = (
+                    f"{len(unpriced)} item(ns) sem preço buscado hoje: chame request_prices (o "
+                    "celular busca, ~1 min) e depois shopping_list de novo."
+                )
         elif not plan and not geohash:
             out["prices"] = "sem localização: defina na aba Cozinha para buscar preços"
         if fetched.failed:
@@ -381,12 +430,13 @@ class KitchenTools:
                 if rules is None or not rules["home_geohash"]:
                     raise store.KitchenError("sem localização: defina na aba Cozinha")
                 prices.refresh(conn, [key], rules["home_geohash"], rules["radius_km"], self.fetch)
+            shops = prices.favorite_codes(conn)
             found: list[prices.Offer] = []
-            for unit in ("kg", "l", "un"):
-                found += prices.offers(conn, key, unit, today)
+            for unit in ("kg", "l", "un"):  # converted kg <-> un copies would repeat
+                found += [o for o in prices.offers(conn, key, unit, today, shops) if not o.per_un]
         found.sort(key=lambda o: o.per_unit)
         rows = [
-            f"{o.name}: {o.descr} {format_brl(o.cents)} ({format_brl(round(o.per_unit))}/{o.unit}, "
+            f"{o.name}: {o.descr} {format_brl(o.cents)} ({_unit_price(o)}, "
             f"vendido {o.sold_at[8:10]}/{o.sold_at[5:7]})"
             for o in found[:8]
         ]
@@ -399,24 +449,89 @@ class KitchenTools:
     def price_jobs(self, week_start: str | None = None) -> dict[str, Any]:
         """What the phone should look up today: the week's items without a price fetched
         today, with the cached category of each (saves a request per item)."""
-        mon = self._week(week_start)
         today = self.today()
         with self._conn() as conn:
             rules = store.rules(conn)
             if rules is None or not rules["home_geohash"]:
                 raise store.KitchenError("sem localização: peça com request_location")
-            needs = store.shopping_needs(store.week(conn, mon), 1.0)
-            terms = [
-                {"term": n.search, "category": prices.category_of(conn, n.search)}
-                for n in needs
-                if not prices.fetched_today(conn, n.search, today)
-            ][:PHONE_MAX_TERMS]
+            wanted = self._price_terms(conn, week_start)
+            terms = []
+            for t in wanted:
+                if prices.fetched_today(conn, t, today):
+                    continue
+                b = prices.brand_of(conn, t)
+                job: dict[str, Any] = {"term": t, "category": prices.category_of(conn, t)}
+                if b:  # Menor Preço: "product name, brand or barcode" in the same field
+                    job["query"] = f"{t} {b[0]}"
+                terms.append(job)
         return {
             "geohash": rules["home_geohash"],
             "radius_km": rules["radius_km"],
-            "terms": terms,
-            "total": len(needs),
+            "terms": terms[:PHONE_MAX_TERMS],
+            "total": len(wanted),
+            "menu": bool(wanted),
         }
+
+    def _price_terms(self, conn: sqlite3.Connection, week_start: str | None) -> list[str]:
+        """Items to price: the given week, or this week and the next (a menu is often
+        planned on Sunday for the week ahead)."""
+        if week_start:
+            weeks = [self._week(week_start)]
+        else:
+            mon = store.monday(self.today())
+            weeks = [mon, mon + timedelta(days=7)]
+        terms: list[str] = []
+        for w in weeks:
+            terms += [n.search for n in store.shopping_needs(store.week(conn, w), 1.0)]
+        return list(dict.fromkeys(terms))
+
+    def price_status(self) -> dict[str, Any]:
+        """How many of the menu's items have a price looked up today, and how the last
+        phone lookup ended (for the assistant)."""
+        today = self.today()
+        with self._conn() as conn:
+            terms = self._price_terms(conn, None)
+            done = [t for t in terms if prices.fetched_today(conn, t, today)]
+            last = conn.execute(
+                "SELECT at, user, total, ok, offers, failed, stopped FROM price_lookups "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        out: dict[str, Any] = {"items": len(terms), "with_price_today": len(done)}
+        if last:
+            out["last_phone_lookup"] = {
+                "at": last[0], "by": last[1], "items": last[2], "ok": last[3],
+                "prices": last[4], "failed": last[5], "stopped": last[6],
+            }  # fmt: skip
+        return out
+
+    def log_lookup(self, report: Any) -> dict[str, Any]:
+        """The phone's report at the end of a lookup (counts and stop reason only)."""
+        if not isinstance(report, dict):
+            raise store.KitchenError("relatório inválido")
+
+        def n(key: str) -> int:
+            v = report.get(key)
+            if isinstance(v, bool) or not isinstance(v, int | float):
+                return 0
+            return min(max(int(v), 0), 10_000)
+
+        stopped = report.get("stopped")
+        reason = sanitize_text(str(stopped), 200) if stopped else None
+
+        def do(conn: sqlite3.Connection) -> str:
+            conn.execute(
+                "INSERT INTO price_lookups (at, user, total, ok, offers, failed, stopped) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (now_utc(), self.actor(), n("total"), n("ok"), n("offers"), n("failed"), reason),
+            )
+            conn.execute(
+                "DELETE FROM price_lookups WHERE id NOT IN "
+                "(SELECT id FROM price_lookups ORDER BY id DESC LIMIT 200)"
+            )
+            conn.commit()
+            return "ok"
+
+        return self._write(do)
 
     def store_phone_prices(self, term: Any, category: Any, items: Any) -> dict[str, Any]:
         """One item looked up by the phone: raw Menor Preço products for ``term``."""
@@ -525,11 +640,75 @@ class KitchenTools:
         return self._write(do)
 
     def set_market(self, market: str, favorite: bool = True) -> dict[str, Any]:
+        """Where the household shops ('Condor Boa Vista', 'Ítalo'): a name pattern that
+        matches the stores from the receipts (any spelling of the chain + neighbourhood)."""
+
         def do(conn: sqlite3.Connection) -> str:
-            names = prices.set_favorite(conn, market, favorite)
+            if not prices.place_key(market):
+                raise store.KitchenError("diga o mercado")
+            names = prices.set_favorite(conn, market, favorite, self.actor())
+            if not favorite:
+                return f"Removido dos mercados da casa: {sanitize_text(market, 60)}."
+            label = sanitize_text(market, 60)
             if not names:
-                raise store.KitchenError("mercado não encontrado (use markets com discover=true)")
-            return f"{'Favoritado' if favorite else 'Removido dos favoritos'}: {', '.join(names)}."
+                return (
+                    f"Anotado: {label} é um dos mercados da casa. Ainda não há loja com esse "
+                    "nome nos preços buscados; ela entra quando aparecer."
+                )
+            shown = ", ".join(names[:6]) + (f" e mais {len(names) - 6}" if len(names) > 6 else "")
+            return f"Anotado: {label} é um dos mercados da casa. Lojas que batem: {shown}."
+
+        return self._write(do)
+
+    def set_unit_weight(
+        self, item: str, grams: float | None = None, ml: float | None = None
+    ) -> dict[str, Any]:
+        """How much one unit of an item weighs (grams) or holds (ml): 'limão' -> 100 g. Lets
+        a recipe in units be priced by the kg (or l), and the other way round."""
+        key = store.search_key(item)
+        if not key:
+            raise store.KitchenError("diga o produto")
+        if grams is None and ml is None:
+            raise store.KitchenError("informe grams ou ml de uma unidade")
+        for v in (grams, ml):
+            if v is not None and not 0 < float(v) <= 50_000:
+                raise store.KitchenError("peso/volume de uma unidade fora do intervalo")
+        kg = float(grams) / 1000 if grams is not None else None
+        litres = float(ml) / 1000 if ml is not None else None
+
+        def do(conn: sqlite3.Connection) -> str:
+            prices.set_equivalence(conn, key, kg, litres, self.actor())
+            parts = [f"{grams:g} g" if grams is not None else "", f"{ml:g} ml" if ml else ""]
+            return f"1 un de {key} ≈ {' / '.join(p for p in parts if p)}."
+
+        return self._write(do)
+
+    def set_brand(self, item: str, brand: str | None) -> dict[str, Any]:
+        """The brand bought for an item ('arroz' -> 'Tio João'); empty brand forgets it.
+        The next price lookup searches that brand, and the list prefers it."""
+        key = store.search_key(item)
+        if not key:
+            raise store.KitchenError("diga o produto")
+        label = sanitize_text(brand or "", 40) or ""
+        folded = prices.fold(label)
+
+        def do(conn: sqlite3.Connection) -> str:
+            if not folded:
+                conn.execute("DELETE FROM item_brands WHERE search = ?", (key,))
+                msg = f"{key}: qualquer marca."
+            else:
+                conn.execute(
+                    "INSERT INTO item_brands (search, brand, label, updated_at, updated_by) "
+                    "VALUES (?, ?, ?, ?, ?) ON CONFLICT (search) DO UPDATE SET "
+                    "brand = excluded.brand, label = excluded.label, "
+                    "updated_at = excluded.updated_at, updated_by = excluded.updated_by",
+                    (key, folded, label, now_utc(), self.actor()),
+                )
+                msg = f"{key}: marca {label}."
+            # today's lookup was for another brand: look it up again
+            conn.execute("DELETE FROM price_fetch WHERE search = ?", (key,))
+            conn.commit()
+            return msg
 
         return self._write(do)
 
@@ -563,6 +742,33 @@ class KitchenTools:
             "radius_km": rules["radius_km"] if rules else 5,
             "answered_today": any(d["day"] == today.isoformat() for d in log),
         }
+
+
+def _other_units(unit: str) -> tuple[str, ...]:
+    """Units an equivalence can bridge: units <-> kg or l."""
+    return ("kg", "l") if unit == "un" else ("un",)
+
+
+def _unit_price(o: prices.Offer) -> str:
+    """'R$ 6,00/kg' or, when converted by average weight, 'R$ 6,00/kg (~100 g/un)'."""
+    if o.per_un:
+        amount, base = o.per_un
+        return f"{format_brl(round(o.per_base))}/{base} (~{_fmt_size(amount, base)}/un)"
+    return f"{format_brl(round(o.per_unit))}/{o.unit}"
+
+
+def _by_market(
+    per_need: list[dict[str, tuple[int, prices.Offer]]], names: dict[str, str], total: int
+) -> list[str]:
+    """Each store's basket: how many items it has a price for and their cost (top 6)."""
+    rows: dict[str, list[int]] = {}
+    for b in per_need:
+        for m, (c, _) in b.items():
+            r = rows.setdefault(m, [0, 0])
+            r[0] += 1
+            r[1] += c
+    best = sorted(rows.items(), key=lambda x: (-x[1][0], x[1][1]))[:6]
+    return [f"{names[m]}: {n} de {total} itens, {format_brl(c)}" for m, (n, c) in best]
 
 
 def _qty(qty: float, unit: str) -> str:

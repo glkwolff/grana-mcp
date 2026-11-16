@@ -23,7 +23,7 @@ TODAY = date(2026, 11, 15)
 KITCHEN_TOOLS = {
     "kitchen_status", "set_diet_profile", "set_kitchen_rules", "log_weight", "log_day",
     "set_meal_plan", "meal_plan", "shopping_list", "find_prices", "markets", "set_market",
-    "note_price",
+    "note_price", "set_brand", "set_unit_weight",
 }  # fmt: skip
 _ids = itertools.count(1)
 

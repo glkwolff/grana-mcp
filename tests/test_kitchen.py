@@ -265,6 +265,12 @@ def test_shopping_list_with_prices(conn: sqlite3.Connection) -> None:
         ("OVO BRANCO GRANDE DZ", "ovos", True),
         ("MASSA JOIA PARAFUSO COM OVOS 500GR", "ovos", False),
         ("FEIJAO PRETO 1KG", "feijao preto", True),
+        ("CEBOLA EM PO 50G", "cebola", False),
+        ("ALHO DESID DONA NENA 10G", "alho", False),
+        ("ALHO PORO UN", "alho", False),
+        ("ALHO PORO UN", "alho poro", True),
+        ("LEITE EM PO NINHO 400G", "leite", False),
+        ("CEBOLA ROXA KG", "cebola", True),
     ],
 )
 def test_relevant(desc: str, term: str, ok: bool) -> None:
@@ -521,6 +527,8 @@ def test_prices_looked_up_by_the_phone(conn: sqlite3.Connection, tmp_path: Any) 
     assert jobs_web["geohash"] == "6gkzqf" and isinstance(jobs_web["terms"], list)  # real clock
     item = {"term": "leite", "category": 2, "items": CATALOG["arroz"][:1]}
     assert client.post("/api/kitchen/prices/item", json=item, headers=h).json()["ok"]
+    report = {"total": 4, "ok": 4, "offers": 9, "failed": 0, "stopped": None}
+    assert client.post("/api/kitchen/prices/done", json=report, headers=h).json()["ok"]
     bad = {"term": "arroz", "items": scrambled}
     assert client.post("/api/kitchen/prices/item", json=bad, headers=h).status_code == 400
     csp = client.get("/api/kitchen", headers=h).headers["content-security-policy"]
@@ -537,3 +545,164 @@ def test_server_lookup_stops_on_scrambled_answer(conn: sqlite3.Connection) -> No
     r = prices.refresh(conn, ["arroz", "feijao"], "6gkzqf", 2, scrambled)
     assert calls == ["arroz"] and r.failed == ["arroz"]  # stopped at the first one
     assert conn.execute("SELECT COUNT(*) FROM price_obs").fetchone()[0] == 0
+
+
+def shop_item(
+    desc: str, cents: int, code: str, name: str, bairro: str, gtin: str = "789"
+) -> dict[str, Any]:
+    item = store_item(desc, cents, code, gtin=gtin)
+    item["estabelecimento"].update(nm_fan=name, bairro=bairro)
+    return item
+
+
+RICE = [
+    shop_item("ARROZ TIO JOAO T1 5KG", 32_00, "c1", "CONDOR SUPER CENTER LTDA", "BOA VISTA"),
+    shop_item("ARROZ BURITI 5KG", 24_00, "c1", "CONDOR SUPER CENTER LTDA", "BOA VISTA"),
+    shop_item("ARROZ T JOAO 5KG", 29_00, "c2", "CONDOR SUPER CENTER LTDA", "PORTAO"),
+    shop_item("ARROZ TIO JOAO 5KG", 30_00, "it", "ITALO SUPERMERCADOS LTDA", "PORTAO"),
+    shop_item("ARROZ BURITI 5KG", 18_00, "an", "ANGELONI SUPERMERCADOS", "AGUA VERDE"),
+]
+
+
+def test_household_markets_and_brand(conn: sqlite3.Connection) -> None:
+    k = kt()
+    k.set_kitchen_rules(home_geohash="6gkzqf")
+    k.set_meal_plan([{"day": 0, "meal": "almoco", "title": "Arroz", "ingredients": [
+        {"item": "arroz", "qty": 500, "unit": "g", "search": "arroz"}]}])  # fmt: skip
+    k.store_phone_prices("arroz", 7, RICE)
+    out = k.shopping_list(refresh=False)
+    assert out["markets"] == ["ANGELONI SUPERMERCADOS"]  # nobody said where they shop yet
+    assert "set_market" in out["ask"] and "set_market" in " ".join(k.kitchen_status()["todo"])
+
+    # the chain + neighbourhood picks one branch, whatever the receipt calls it
+    msg = k.set_market("Condor Boa Vista")["summary"]
+    assert "CONDOR SUPER CENTER LTDA" in msg
+    assert "Lojas que batem" in k.set_market("Ítalo")["summary"]  # accents don't matter
+    assert "ainda não há loja" in k.set_market("Festval da Kennedy")["summary"].lower()
+    assert prices.favorite_codes(conn) == {"c1", "it"}  # not the Condor in Portão, not Angeloni
+    assert k.kitchen_status()["favorite_markets"] == [
+        "Condor Boa Vista",
+        "Ítalo",
+        "Festval da Kennedy",
+    ]
+    out = k.shopping_list(refresh=False)
+    assert out["compared_among"] == ["Condor Boa Vista", "Ítalo", "Festval da Kennedy"]
+    assert out["markets"] == ["CONDOR SUPER CENTER LTDA"] and out["estimated_total"] == "R$ 24,00"
+    assert out["by_market"][0].startswith("CONDOR SUPER CENTER LTDA: 1 de 1 itens, R$ 24,00")
+    assert "ask" not in out
+
+    # the brand they buy: looked up by name, and only that brand counts
+    assert "Tio João" in k.set_brand("Arroz", "Tio João")["summary"]
+    jobs = k.price_jobs()
+    assert jobs["terms"][0]["query"] == "arroz tio joao"  # lookup redone for the brand
+    k.store_phone_prices("arroz", 7, RICE)
+    out = k.shopping_list(refresh=False)
+    assert out["items"][0]["brand"] == "Tio João" and "TIO JOAO" in out["items"][0]["product"]
+    assert out["markets"] == ["ITALO SUPERMERCADOS LTDA"] and out["estimated_total"] == "R$ 30,00"
+
+    # brand not found among the household's stores: another brand, said so
+    k.set_brand("arroz", "Camil")
+    k.store_phone_prices("arroz", 7, RICE)
+    item = k.shopping_list(refresh=False)["items"][0]
+    assert "outra marca" in item["brand_note"] and item["cost"] == "R$ 24,00"
+    k.set_brand("arroz", "")
+    assert "brand" not in k.shopping_list(refresh=False)["items"][0]
+
+    assert "Removido" in k.set_market("Ítalo", favorite=False)["summary"]
+    assert prices.favorite_codes(conn) == {"c1"}
+    with pytest.raises(store.KitchenError):
+        k.set_market("  de  ")
+
+
+def test_fresh_produce_and_odd_products(conn: sqlite3.Connection) -> None:
+    k = kt()
+    k.set_kitchen_rules(home_geohash="6gkzqf")
+    k.set_meal_plan([{"day": 0, "meal": "almoco", "title": "Cebola", "ingredients": [
+        {"item": "cebola", "qty": 300, "unit": "g", "search": "cebola"}]}])  # fmt: skip
+    onions = [
+        shop_item("CEBOLA 10G", 2_99, "it", "ITALO SUPERMERCADOS", "PORTAO"),  # seasoning
+        shop_item("CEBOLA EM FLOCOS 25G", 2_85, "it", "ITALO SUPERMERCADOS", "PORTAO"),
+        shop_item("CEBOLA", 4_50, "it", "ITALO SUPERMERCADOS", "PORTAO", gtin=""),  # per kg
+        shop_item("CEBOLA NACIONAL KG", 5_00, "it", "ITALO SUPERMERCADOS", "PORTAO", gtin=""),
+        shop_item("CEBOLA REDE 1KG", 6_00, "it", "ITALO SUPERMERCADOS", "PORTAO"),
+        shop_item("CEBOLA ROXA KG", 7_00, "it", "ITALO SUPERMERCADOS", "PORTAO", gtin=""),
+    ]
+    k.store_phone_prices("cebola", 7, onions)
+    k.set_market("Italo")
+    item = k.shopping_list(refresh=False)["items"][0]
+    assert (
+        item["product"] == "CEBOLA" and item["cost"] == "R$ 2,70"
+    )  # 2 portions x 300 g of R$ 4,50/kg
+    found = " ".join(k.find_prices("cebola")["offers"])
+    assert "10G" not in found and "FLOCOS" not in found
+
+
+def test_menu_for_next_week_and_lookup_report(conn: sqlite3.Connection) -> None:
+    sunday = KitchenTools(config.db_path(), lambda: date(2026, 11, 22), lambda: "ana")
+    sunday.set_kitchen_rules(home_geohash="6gkzqf")
+    assert sunday.price_jobs()["menu"] is False  # nothing to look up, and it says so
+    sunday.set_meal_plan(MEALS, "2026-11-23")  # planned on Sunday for the week ahead
+    assert {j["term"] for j in sunday.price_jobs()["terms"]} == {
+        "arroz",
+        "feijao",
+        "ovos",
+        "banana",
+    }
+    out = sunday.shopping_list(refresh=False)
+    assert out["week_start"] == "2026-11-23" and "request_prices" in out["next_step"]
+    sunday.log_lookup({"total": 4, "ok": 3, "offers": 9, "failed": 1, "stopped": "parou\x00"})
+    last = sunday.kitchen_status()["prices_today"]["last_phone_lookup"]
+    assert last["ok"] == 3 and last["by"] == "ana" and last["stopped"] == "parou"
+    sunday.log_lookup({"total": "x", "ok": True})  # junk counts become 0
+    assert sunday.kitchen_status()["prices_today"]["last_phone_lookup"]["items"] == 0
+    with pytest.raises(store.KitchenError):
+        sunday.log_lookup("nada")
+
+
+def test_units_and_kilos_by_the_households_equivalence(conn: sqlite3.Connection) -> None:
+    k = kt()
+    k.set_kitchen_rules(home_geohash="6gkzqf")
+    k.set_meal_plan([{"day": 0, "meal": "almoco", "title": "Peixe", "ingredients": [
+        {"item": "limão", "qty": 1, "unit": "un", "search": "limao"},
+        {"item": "batata", "qty": 250, "unit": "g", "search": "batata"},
+        {"item": "leite", "qty": 1, "unit": "un", "search": "leite"},
+    ]}])  # fmt: skip
+    italo = ("it", "ITALO SUPERMERCADOS", "PORTAO")
+    k.store_phone_prices("limao", 7, [
+        shop_item("LIMAO TAHITI KG", 6_00, *italo, gtin=""),  # by the kg
+        shop_item("REFRIG LIMAO 2L", 8_00, *italo),
+    ])  # fmt: skip
+    k.store_phone_prices("batata", 7, [shop_item("BATATA LAVADA UN", 1_00, *italo, gtin="")])
+    k.store_phone_prices("leite", 7, [shop_item("LEITE INTEGRAL 1L", 5_00, *italo)])
+    k.set_market("Italo")
+
+    # no equivalence yet: no price, and the list says what to set
+    out = k.shopping_list(refresh=False)
+    assert {(c["item"], c["sold_by"]) for c in out["needs_conversion"]} == {
+        ("batata", "un"), ("leite", "l"), ("limão", "kg")
+    }  # fmt: skip
+    assert "set_unit_weight" in out["next_step_units"]
+
+    k.set_unit_weight("Limão", grams=100)
+    k.set_unit_weight("batata", grams=200)
+    assert "1000 ml" in k.set_unit_weight("leite", ml=1000)["summary"]
+    out = k.shopping_list(refresh=False)
+    assert "needs_conversion" not in out
+    items = {i["item"]: i for i in out["items"]}
+    # 2 portions x 1 lemon = 2 x 100 g at R$ 6,00/kg
+    assert items["limão"]["cost"] == "R$ 1,20"
+    assert items["limão"]["unit_price"] == "R$ 6,00/kg (~100 g/un)"
+    assert items["batata"]["cost"] == "R$ 3,00"  # 500 g of ~200 g potatoes: 3 of them
+    assert items["leite"]["cost"] == "R$ 10,00"  # 2 cartons
+    assert len(k.find_prices("limao")["offers"]) == 1  # not repeated as kg and as un
+
+    k.set_unit_weight("limao", grams=125)  # corrected later: kept, the rest untouched
+    assert prices.equivalence(conn, "limao") == {"kg": 0.125}
+    assert prices.equivalence(conn, "limao taiti") == {"kg": 0.125}  # first word
+    k.note_price("limão", 4.0, "Italo", unit="kg")  # noted per kg, recipe in units
+    lemon = next(i for i in k.shopping_list(refresh=False)["items"] if i["item"] == "limão")
+    assert lemon["cost"] == "R$ 1,00"  # 2 x 125 g at R$ 4,00/kg
+    with pytest.raises(store.KitchenError):
+        k.set_unit_weight("limao")
+    with pytest.raises(store.KitchenError):
+        k.set_unit_weight("limao", grams=0)

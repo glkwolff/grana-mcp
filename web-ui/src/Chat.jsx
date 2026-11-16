@@ -16,6 +16,8 @@ const TOOL_LABELS = {
   find_prices: "buscando preços",
   markets: "procurando mercados",
   set_market: "salvando o mercado",
+  set_brand: "salvando a marca",
+  set_unit_weight: "anotando o peso por unidade",
   note_price: "anotando o preço",
   request_location: "pedindo a localização ao celular",
   request_notifications: "preparando as notificações",
@@ -191,7 +193,7 @@ export function Chat({ messages, setMessages, thread, setThread, pending, onDone
         else if (ev.type === "tool") {
           tools += 1;
           if (DEVICE[ev.name]) device.add(DEVICE[ev.name]);
-          if (["set_budget", "set_goal", "delete_goal", "post_notice", "delete_notice", "set_category_rule", "remember", "forget", "set_diet_profile", "set_kitchen_rules", "log_weight", "log_day", "set_meal_plan", "set_market", "note_price"].includes(ev.name)) wrote = true;
+          if (["set_budget", "set_goal", "delete_goal", "post_notice", "delete_notice", "set_category_rule", "remember", "forget", "set_diet_profile", "set_kitchen_rules", "log_weight", "log_day", "set_meal_plan", "set_market", "set_brand", "set_unit_weight", "note_price"].includes(ev.name)) wrote = true;
           patch((x) => ({ status: `${TOOL_LABELS[ev.name] || "consultando"}…`, text: x.text ? `${x.text}\n\n` : "" }));
         } else if (ev.type === "done") patch((x) => ({ text: ev.result || x.text, status: null, meta: usageLine(ev.usage, tools) }));
         else if (ev.type === "error") patch(() => ({ error: ev.message, status: null }));

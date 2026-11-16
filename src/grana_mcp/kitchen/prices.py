@@ -16,9 +16,11 @@ import math
 import re
 import sqlite3
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from itertools import combinations
+from types import EllipsisType
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
@@ -57,6 +59,19 @@ _SIZE_RE = re.compile(
 _DOZEN_RE = re.compile(r"\b(DZ|DUZIA)\b")
 _BOX_RE = re.compile(r"\b(?:C|CX|C/)\s?(\d{1,3})\b")  # "OVOS BCO C10": box of 10
 _LOOSE_RE = re.compile(r"(?<![\d.])\s*\b(KG|KILO)\b")  # "TOMATE KG": priced per kg
+_EACH_RE = re.compile(r"\b(UN|UND|UNID|UNIDADE)\b")  # "BATATA LAVADA UN": priced per unit
+# Processed versions of a fresh item ("CEBOLA EM PO", "ALHO DESIDRATADO", "ALHO PORO",
+# "CALDO ... LEGUMES"): left out unless the search asks for them.
+_PROCESSED = ("DESID", "FLOCO", "CALDO", "TEMPER", "COND", "SAZON", "PORO", "SOPINHA",
+              "GRANUL", "REFRIG", "REFRESC", "SALGAD", "CHIPS")  # fmt: skip
+# Fresh produce: a receipt line without a size ("CEBOLA") is the price per kg.
+PRODUCE = {"cebola", "alho", "tomate", "batata", "cenoura", "beterraba", "abobrinha", "chuchu",
+           "pimentao", "pepino", "mandioca", "aipim", "inhame", "repolho", "abobora", "banana",
+           "maca", "laranja", "mamao", "manga", "abacate", "melancia", "melao", "pera", "uva",
+           "gengibre", "limao", "kiwi", "maracuja", "berinjela", "vagem", "quiabo"}  # fmt: skip
+OUTLIER_FACTOR = 3.0  # an offer costing 3x the median per kg/l/un is a different product
+_PLACE_STOP = {"da", "do", "de", "das", "dos", "e", "supermercado", "supermercados", "mercado",
+               "mercados", "ltda", "sa", "me", "eireli"}  # fmt: skip
 
 
 class Fetcher(Protocol):
@@ -73,10 +88,59 @@ class Offer:
     unit: str
     sold_at: str
     loose: bool = False
+    # converted with the household's equivalence: (kg or l in one unit, "kg" or "l")
+    per_un: tuple[float, str] | None = None
 
     @property
     def per_unit(self) -> float:
         return self.cents / self.size
+
+    @property
+    def per_base(self) -> float:
+        """Price per kg/l of a converted offer (what the store actually charges by)."""
+        if self.per_un and self.unit == "un":
+            return self.per_unit / self.per_un[0]
+        return self.per_unit
+
+
+Equiv = dict[str, float]  # {"kg": kg in one unit, "l": litres in one unit}
+
+
+def equivalence(conn: sqlite3.Connection, term: str) -> Equiv:
+    """How much one unit of ``term`` weighs (or holds), as the household/assistant set it
+    (item_units); falls back to the first word ('limao taiti' -> 'limao')."""
+    for key in dict.fromkeys([term, term.split()[0] if term else ""]):
+        row = conn.execute(
+            "SELECT kg_per_un, l_per_un FROM item_units WHERE search = ?", (key,)
+        ).fetchone()
+        if row:
+            return {u: float(v) for u, v in zip(("kg", "l"), row, strict=True) if v}
+    return {}
+
+
+def set_equivalence(
+    conn: sqlite3.Connection, term: str, kg: float | None, litres: float | None, by: str | None
+) -> None:
+    conn.execute(
+        "INSERT INTO item_units (search, kg_per_un, l_per_un, updated_at, updated_by) "
+        "VALUES (?, ?, ?, ?, ?) ON CONFLICT (search) DO UPDATE SET "
+        "kg_per_un = COALESCE(excluded.kg_per_un, kg_per_un), "
+        "l_per_un = COALESCE(excluded.l_per_un, l_per_un), "
+        "updated_at = excluded.updated_at, updated_by = excluded.updated_by",
+        (term, kg, litres, now_utc(), by),
+    )
+    conn.commit()
+
+
+def _convert(
+    size: float, u: str, unit: str, eq: Equiv
+) -> tuple[float, str, tuple[float, str] | None]:
+    """A size in ``u`` expressed in the wanted ``unit`` (kg/l <-> un by the equivalence)."""
+    if unit == "un" and eq.get(u):
+        return size / eq[u], "un", (eq[u], u)
+    if u == "un" and eq.get(unit):
+        return size * eq[unit], unit, (eq[unit], unit)
+    return size, u, None
 
 
 def parse_size(descr: str) -> tuple[float, str] | None:
@@ -108,14 +172,63 @@ def parse_size(descr: str) -> tuple[float, str] | None:
 
 def relevant(descr: str, term: str) -> bool:
     """Receipts start with the product noun: 'ARROZ BURITI 5KG' is rice, 'DOG CHOW ... ARROZ'
-    is not. The first word must share a prefix with the first search word."""
+    is not. The first word must share a prefix with the first search word, and processed
+    versions ('CEBOLA EM PO', 'ALHO PORO') are out unless the search asks for them."""
     words = term.split()
-    first = re.split(r"[^A-Z]+", descr.upper().strip(), maxsplit=1)[0]
-    if not words or not first:
+    found = [w for w in re.split(r"[^A-Z]+", fold(descr).upper()) if w]  # 'LIMÃO' -> 'LIMAO'
+    if not words or not found:
         return False
     key = words[0].upper()
     prefix = key[:4] if len(key) > 4 else key[:3]
-    return first.startswith(prefix)
+    if not found[0].startswith(prefix):
+        return False
+    asked = term.upper().split()
+    for w in found[1:]:
+        hit = "PO" if w == "PO" else next((p for p in _PROCESSED if w.startswith(p)), None)
+        if hit and not any(a.startswith(hit) for a in asked):
+            return False
+    return True
+
+
+def fold(text: str) -> str:
+    """Lowercase ASCII words: 'Ítalo Supermercados' -> 'italo supermercados'."""
+    ascii_ = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode().lower()
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", ascii_).split())
+
+
+def place_key(text: str) -> str:
+    """Words that identify a store: 'Festval da Kennedy' -> 'festval kennedy'."""
+    return " ".join([w for w in fold(text).split() if w not in _PLACE_STOP][:5])
+
+
+def _word_hit(w: str, words: list[str]) -> bool:
+    """``w`` is one of ``words``, or a long enough prefix of one ('compania' ~ 'companhia'
+    is not, but 'condor' ~ 'condor', 'festv' ~ 'festval')."""
+    return any(h == w or (len(w) >= 4 and h.startswith(w)) for h in words)
+
+
+def matches_place(key: str, name: str, address: str | None) -> bool:
+    """Every word of ``key`` is in the store's name or address (neighbourhood)."""
+    words = fold(f"{name} {address or ''}").split()
+    return bool(key) and all(_word_hit(w, words) for w in key.split())
+
+
+def place_hits(key: str, rows: list[Any]) -> list[Any]:
+    """Stores (code, name, address, ...) for a place: by name when some store's name has all
+    the words ('fazendinha' -> 'MAXXI FAZENDINHA', not every shop in that neighbourhood),
+    else by name + neighbourhood ('condor boa vista')."""
+    by_name = [r for r in rows if matches_place(key, str(r[1]), None)]
+    return by_name or [r for r in rows if matches_place(key, str(r[1]), r[2])]
+
+
+def matches_brand(brand: str, descr: str) -> bool:
+    """Receipts abbreviate ('ARROZ T JOAO 5KG'): each brand word must start a word of the
+    description, or a word of it must start the brand word (3+ letters)."""
+    words = fold(descr).split()
+    return bool(brand) and all(
+        any(d.startswith(w[:4]) or (len(d) >= 3 and w.startswith(d)) for d in words[1:])
+        for w in brand.split()
+    )
 
 
 def is_loose(descr: str) -> bool:
@@ -293,38 +406,101 @@ def refresh(
 # --- choosing where to buy ---
 
 
-def offers(conn: sqlite3.Connection, term: str, unit: str, today: date) -> list[Offer]:
-    """Recent offers for a term in favorite markets (all markets if none is favorite)."""
-    favorites = conn.execute("SELECT COUNT(*) FROM markets WHERE favorite = 1").fetchone()[0]
+def favorite_codes(conn: sqlite3.Connection) -> set[str] | None:
+    """Stores where the household shops: marked by hand, or matching a shop_places pattern.
+    None when nothing was said (then every nearby store counts)."""
+    keys = [str(r[0]) for r in conn.execute("SELECT key FROM shop_places")]
+    rows = conn.execute("SELECT code, name, address, favorite FROM markets").fetchall()
+    if not keys and not any(r[3] for r in rows):
+        return None
+    codes = {str(r[0]) for r in rows if r[3]}
+    for k in keys:
+        codes |= {str(r[0]) for r in place_hits(k, rows)}
+    return codes
+
+
+def offers(
+    conn: sqlite3.Connection,
+    term: str,
+    unit: str,
+    today: date,
+    shops: set[str] | EllipsisType | None = ...,
+) -> list[Offer]:
+    """Recent offers for a term in the household's stores (all stores if none was given).
+    ``shops``: favorite_codes(conn), when the caller already has it."""
+    if isinstance(shops, EllipsisType):
+        shops = favorite_codes(conn)
+    favorites = shops is not None
     since = (today - timedelta(days=FRESH_DAYS)).isoformat()
     since_noted = (today - timedelta(days=NOTED_DAYS)).isoformat()
     fetched_since = day_start_utc(today)
     rows = conn.execute(
         "SELECT o.market, m.name, o.descr, o.cents, o.size, o.unit, o.sold_at, o.gtin, "
         "o.fetched_at FROM price_obs o JOIN markets m ON m.code = o.market "
-        "WHERE o.search = ? AND o.sold_at >= ? AND (? = 0 OR m.favorite = 1)",
-        (term, min(since, since_noted), favorites),
+        "WHERE o.search = ? AND o.sold_at >= ?",
+        (term, min(since, since_noted)),
     ).fetchall()
-    out = []
+    out: list[Offer] = []
+    receipts: list[Offer] = []
+    produce = bool(term) and (term in PRODUCE or term.split()[0] in PRODUCE)
+    eq = equivalence(conn, term)
     for r in rows:
+        if shops is not None and r[0] not in shops:
+            continue
         noted = str(r[0]).startswith(LOCAL_PREFIXES)
         if noted:
-            if r[6] < since_noted or r[5] != unit or not r[4]:
+            if r[6] < since_noted or not r[4] or not r[5]:
+                continue
+            size, u, per_un = _convert(float(r[4]), str(r[5]), unit, eq)
+            if u != unit:
                 continue
             loose = str(r[2]).endswith(BY_WEIGHT)
-            out.append(Offer(r[0], r[1], r[2], r[3], float(r[4]), r[5], r[6], loose))
+            out.append(Offer(r[0], r[1], r[2], r[3], size, u, r[6], loose, per_un))
             continue
         if r[6] < since or r[8] < fetched_since or not relevant(r[2], term):
             continue
         size, u = r[4], r[5]
+        loose = is_loose(r[2])
+        each = bool(_EACH_RE.search(str(r[2]).upper()))
+        if u is None and each:  # "OVO UN", "BATATA LAVADA UN": one unit
+            size, u = 1.0, "un"
+        if u is None and produce:  # "CEBOLA": fresh produce is priced per kg
+            size, u, loose = 1.0, "kg", True
         if u is None and unit == "un" and (favorites or r[7]):
             size, u = 1.0, "un"
-        if u != unit or not size:
+        if not u or not size:
             continue
-        if not favorites and not r[7] and not is_loose(r[2]):
+        size, u, per_un = _convert(float(size), u, unit, eq)
+        if u != unit:
+            continue
+        if not favorites and not r[7] and not loose:
             continue  # without favorites: barcoded or sold-by-weight only (keeps restaurants out)
-        out.append(Offer(r[0], r[1], r[2], r[3], float(size), u, r[6], is_loose(r[2])))
-    return out
+        receipts.append(Offer(r[0], r[1], r[2], r[3], float(size), u, r[6], loose, per_un))
+    return out + drop_outliers(receipts)
+
+
+def drop_outliers(found: list[Offer]) -> list[Offer]:
+    """A tiny pack of the 'same' item ('CEBOLA 10G' seasoning at R$ 299/kg next to onions at
+    R$ 5/kg) is a different product: drop offers far above the median price per unit."""
+    if len(found) < 4:
+        return found
+    per = sorted(o.per_unit for o in found)
+    median = per[len(per) // 2]
+    return [o for o in found if o.per_unit <= OUTLIER_FACTOR * median]
+
+
+def brand_of(conn: sqlite3.Connection, term: str) -> tuple[str, str] | None:
+    """(folded brand, label) bought for ``term``, if the household said."""
+    row = conn.execute("SELECT brand, label FROM item_brands WHERE search = ?", (term,)).fetchone()
+    return (str(row[0]), str(row[1])) if row else None
+
+
+def prefer_brand(found: list[Offer], brand: str | None) -> tuple[list[Offer], bool]:
+    """Only offers of the brand when there are any; (offers, brand found)."""
+    if not brand:
+        return found, True
+    mine = [o for o in found if matches_brand(brand, o.descr)]
+    return (mine, True) if mine else (found, False)
 
 
 def day_start_utc(day: date) -> str:
@@ -459,13 +635,36 @@ def nearby_markets(conn: sqlite3.Connection, limit: int = 40) -> list[sqlite3.Ro
     ).fetchall()
 
 
-def set_favorite(conn: sqlite3.Connection, name_or_code: str, favorite: bool) -> list[str]:
-    key = name_or_code.strip()
-    rows = conn.execute(
-        "SELECT code, name FROM markets WHERE code = ? OR lower(name) LIKE lower(?)",
-        (key, f"%{key}%"),
-    ).fetchall()
-    for code, _ in rows:
-        conn.execute("UPDATE markets SET favorite = ? WHERE code = ?", (int(favorite), code))
+def set_favorite(
+    conn: sqlite3.Connection, name_or_code: str, favorite: bool, by: str | None = None
+) -> list[str]:
+    """Mark where the household shops. A name is kept as a pattern (shop_places) that matches
+    every store from the receipts and the map with those words in its name or neighbourhood
+    ('condor boa vista', 'italo'); a code marks one store. Returns the stores matched."""
+    raw = name_or_code.strip()
+    one = conn.execute("SELECT code, name FROM markets WHERE code = ?", (raw,)).fetchone()
+    if one:
+        conn.execute("UPDATE markets SET favorite = ? WHERE code = ?", (int(favorite), one[0]))
+        conn.commit()
+        return [str(one[1])]
+    key = place_key(raw)
+    if not key:
+        return []
+    rows = conn.execute("SELECT code, name, address FROM markets").fetchall()
+    hits = place_hits(key, rows)
+    if favorite:
+        conn.execute(
+            "INSERT INTO shop_places (key, label, created_at, created_by) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT (key) DO UPDATE SET label = excluded.label",
+            (key, sanitize_text(raw, 60) or key, now_utc(), by),
+        )
+    else:
+        conn.execute("DELETE FROM shop_places WHERE key = ?", (key,))
+    for r in hits:
+        conn.execute("UPDATE markets SET favorite = ? WHERE code = ?", (int(favorite), r[0]))
     conn.commit()
-    return [str(r[1]) for r in rows]
+    return sorted({str(r[1]) for r in hits})
+
+
+def shop_places(conn: sqlite3.Connection) -> list[str]:
+    return [str(r[0]) for r in conn.execute("SELECT label FROM shop_places ORDER BY created_at")]

@@ -31,7 +31,7 @@ def test_existing_db_permissions_are_tightened() -> None:
 
 def test_migrations_create_all_tables_and_are_idempotent() -> None:
     conn = db.connect(config.db_path())
-    assert db.schema_version(conn) == db.LATEST_VERSION == 12
+    assert db.schema_version(conn) == db.LATEST_VERSION == 14
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert tables >= {
         "schema_version",
@@ -56,11 +56,15 @@ def test_migrations_create_all_tables_and_are_idempotent() -> None:
         "diet_people",
         "meal_plan",
         "price_obs",
+        "price_lookups",
+        "shop_places",
+        "item_brands",
+        "item_units",
     }
     conn.close()
     conn = db.connect(config.db_path())
-    assert db.migrate(conn) == 12
-    assert conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == 12
+    assert db.migrate(conn) == 14
+    assert conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == 14
 
 
 def test_salt_is_private_and_stable() -> None:
