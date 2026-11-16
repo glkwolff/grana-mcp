@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "preact/hooks";
 import { api, getJSON, streamChat, Unauthorized } from "./api.js";
 import { Markdown } from "./markdown.jsx";
 import { enablePush } from "./Notify.jsx";
+import { photoText, postPhoto, shrink } from "./photo.js";
 import { lookupPrices, summary } from "./phonePrices.js";
 
 const TOOL_LABELS = {
@@ -18,6 +19,9 @@ const TOOL_LABELS = {
   set_market: "salvando o mercado",
   set_brand: "salvando a marca",
   set_unit_weight: "anotando o peso por unidade",
+  log_meal: "anotando a refeição",
+  delete_meal: "apagando o registro",
+  food_diary: "olhando o dia",
   note_price: "anotando o preço",
   request_location: "pedindo a localização ao celular",
   request_notifications: "preparando as notificações",
@@ -112,6 +116,8 @@ function usageLine(u, tools) {
 
 export function Chat({ messages, setMessages, thread, setThread, pending, onDone, onUnauthorized }) {
   const [text, setText] = useState("");
+  const [photo, setPhoto] = useState(null); // data: URL waiting to be sent
+  const [photoErr, setPhotoErr] = useState("");
   const [list, setList] = useState(null); // past conversations, when open
   const threadRef = useRef(thread);
   threadRef.current = thread;
@@ -175,6 +181,28 @@ export function Chat({ messages, setMessages, thread, setThread, pending, onDone
     }
   }
 
+  // A plate photo goes to a separate, cheap estimate (not this conversation's session).
+  async function sendPhoto(image, note) {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    const id = Date.now();
+    setMessages((m) => [...m, { role: "me", text: note, image }, { role: "bot", id, text: "", status: "estimando as calorias…" }]);
+    scroll(true);
+    try {
+      const r = await postPhoto(image, note);
+      patchMsg(id, () => ({ text: photoText(r), status: null }));
+    } catch (e) {
+      if (e instanceof Unauthorized) return onUnauthorized();
+      patchMsg(id, () => ({ error: e.message, status: null }));
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+      onDone(true);
+      scroll();
+    }
+  }
+
   async function ask(q) {
     if (!q.trim() || busyRef.current) return;
     busyRef.current = true;
@@ -193,7 +221,7 @@ export function Chat({ messages, setMessages, thread, setThread, pending, onDone
         else if (ev.type === "tool") {
           tools += 1;
           if (DEVICE[ev.name]) device.add(DEVICE[ev.name]);
-          if (["set_budget", "set_goal", "delete_goal", "post_notice", "delete_notice", "set_category_rule", "remember", "forget", "set_diet_profile", "set_kitchen_rules", "log_weight", "log_day", "set_meal_plan", "set_market", "set_brand", "set_unit_weight", "note_price"].includes(ev.name)) wrote = true;
+          if (["set_budget", "set_goal", "delete_goal", "post_notice", "delete_notice", "set_category_rule", "remember", "forget", "set_diet_profile", "set_kitchen_rules", "log_weight", "log_day", "set_meal_plan", "set_market", "set_brand", "set_unit_weight", "log_meal", "delete_meal", "note_price"].includes(ev.name)) wrote = true;
           patch((x) => ({ status: `${TOOL_LABELS[ev.name] || "consultando"}…`, text: x.text ? `${x.text}\n\n` : "" }));
         } else if (ev.type === "done") patch((x) => ({ text: ev.result || x.text, status: null, meta: usageLine(ev.usage, tools) }));
         else if (ev.type === "error") patch(() => ({ error: ev.message, status: null }));
@@ -269,9 +297,19 @@ export function Chat({ messages, setMessages, thread, setThread, pending, onDone
   function submit(e) {
     e.preventDefault();
     const q = text.trim();
-    if (!q) return;
+    if (!q && !photo) return;
     setText("");
-    ask(q);
+    const image = photo;
+    setPhoto(null);
+    if (image) sendPhoto(image, q);
+    else ask(q);
+  }
+
+  async function pick(e) {
+    const file = e.currentTarget.files?.[0];
+    e.currentTarget.value = "";
+    setPhotoErr("");
+    try { if (file) setPhoto(await shrink(file)); } catch (err) { setPhotoErr(err.message); }
   }
 
   return (
@@ -290,6 +328,7 @@ export function Chat({ messages, setMessages, thread, setThread, pending, onDone
         )}
         {messages.map((m, i) => (
           <div class={`msg ${m.role} ${m.error ? "error" : ""}`} key={m.id || i}>
+            {m.image && <img class="msg-photo" src={m.image} alt="foto enviada" />}
             {m.role === "me" ? m.text : <Markdown text={m.text} />}
             {m.error && <div class="err">{m.error}</div>}
             {m.action && <DeviceAction a={m.action} onRun={() => runDevice(m.id, m.action.kind)} />}
@@ -298,12 +337,24 @@ export function Chat({ messages, setMessages, thread, setThread, pending, onDone
           </div>
         ))}
       </div>
+      {(photo || photoErr) && (
+        <div class="photo-tray">
+          {photo && <img src={photo} alt="foto para enviar" />}
+          {photo && <span class="muted small">escreva algo se quiser ("comi metade") e envie; a foto não fica salva</span>}
+          {photoErr && <span class="err small">{photoErr}</span>}
+          <button class="link" type="button" onClick={() => { setPhoto(null); setPhotoErr(""); }}>remover</button>
+        </div>
+      )}
       <form class="ask" onSubmit={submit}>
+        <label class="cam" aria-label="Mandar foto da refeição" title="Mandar foto da refeição">
+          <input type="file" accept="image/*" onChange={pick} disabled={busy} hidden />
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M9 4h6l1.5 2H20a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h3.5zM12 9a4 4 0 1 0 0 8 4 4 0 0 0 0-8z" fill="currentColor" /></svg>
+        </label>
         <textarea
           rows="1"
           maxLength={2000}
           value={text}
-          placeholder="Pergunte ou peça algo…"
+          placeholder={photo ? "Observação (opcional)" : "Pergunte ou peça algo…"}
           onInput={(e) => {
             setText(e.currentTarget.value);
             e.currentTarget.style.height = "";
@@ -313,7 +364,7 @@ export function Chat({ messages, setMessages, thread, setThread, pending, onDone
             if (e.key === "Enter" && !e.shiftKey && !e.isComposing && matchMedia("(pointer: fine)").matches) submit(e);
           }}
         />
-        <button type="submit" disabled={busy || !text.trim()} aria-label="Enviar">
+        <button type="submit" disabled={busy || (!text.trim() && !photo)} aria-label="Enviar">
           <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M3 11.5 21 3l-8.5 18-2-7.5z" fill="currentColor" /></svg>
         </button>
       </form>

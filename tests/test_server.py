@@ -23,7 +23,7 @@ TODAY = date(2026, 11, 15)
 KITCHEN_TOOLS = {
     "kitchen_status", "set_diet_profile", "set_kitchen_rules", "log_weight", "log_day",
     "set_meal_plan", "meal_plan", "shopping_list", "find_prices", "markets", "set_market",
-    "note_price", "set_brand", "set_unit_weight",
+    "note_price", "set_brand", "set_unit_weight", "log_meal", "delete_meal", "food_diary",
 }  # fmt: skip
 _ids = itertools.count(1)
 
@@ -403,7 +403,7 @@ def test_mcp_registration(conn: sqlite3.Connection) -> None:
         # Only these write, and only to the local database.
         writers = {"set_category_rule", "set_budget", "set_goal", "delete_goal",
                    "post_notice", "delete_notice", "remember", "forget",
-                   *(KITCHEN_TOOLS - {"kitchen_status", "meal_plan"})}  # fmt: skip
+                   *(KITCHEN_TOOLS - {"kitchen_status", "meal_plan", "food_diary"})}  # fmt: skip
         assert t.annotations.read_only_hint is (t.name not in writers)
     for name in ("spending_summary", "top_merchants", "find_transactions", "excluded_items",
                  "overview", "explain_category", "household_context"):  # fmt: skip

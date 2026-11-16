@@ -7,6 +7,7 @@ import { api, getJSON, Unauthorized } from "./api.js";
 import { WeightChart } from "./Chart.jsx";
 import { fmtDate, shortDate } from "./fmt.js";
 import { lookupPrices, summary } from "./phonePrices.js";
+import { Ring } from "./FoodRing.jsx";
 
 const DAYS = ["seg", "ter", "qua", "qui", "sex", "sáb", "dom"];
 const MEALS = { cafe: "Café", almoco: "Almoço", lanche: "Lanche", jantar: "Jantar" };
@@ -76,6 +77,13 @@ export function Kitchen({ onAsk, onUnauthorized, refresh }) {
           <p class="muted small">{status.note}</p>
         </section>
       )}
+
+      {people.length > 0 && data.diary && (
+        <Diary d={data.diary} planned={week.meals.filter((m) => m.day === dayIndex(data.today) && m.kcal != null)}
+          busy={busy} act={act} onAsk={onAsk} />
+      )}
+
+      {people.length > 0 && data.diary && <Score s={data.diary.week_score} last={data.diary.last_week_points} />}
 
       {people.length > 0 && (
         <section class="card checkin">
@@ -194,6 +202,70 @@ export function Kitchen({ onAsk, onUnauthorized, refresh }) {
         )}
       </section>
     </div>
+  );
+}
+
+const dayIndex = (iso) => (new Date(`${iso}T12:00:00`).getDay() + 6) % 7;
+
+function Diary({ d, planned, busy, act, onAsk }) {
+  const streak = Object.fromEntries(d.streaks.map((s) => [s.person, s]));
+  return (
+    <section class="card">
+      <header class="card-head"><h2>Hoje</h2><span class="muted small">calorias estimadas</span></header>
+      <div class="rings">
+        {d.intake.map((i) => {
+          const s = streak[i.person];
+          return (
+            <div class="ring-box" key={i.person}>
+              <strong>{i.person}</strong>
+              <Ring kcal={i.kcal} target={i.target_kcal} onTarget={i.on_target} />
+              {i.target_protein_g ? <span class="muted small">proteína {i.protein_g} de {i.target_protein_g} g</span> : null}
+              {s && (s.logging_days > 0 || s.on_target_days > 0) && (
+                <span class="small">🔥 {s.logging_days} dia{s.logging_days === 1 ? "" : "s"} registrando{s.on_target_days ? ` · 🎯 ${s.on_target_days} na meta` : ""}</span>
+              )}
+              {s && s.logging_best > 1 && <span class="muted small">recorde: {s.logging_best} dias</span>}
+            </div>
+          );
+        })}
+      </div>
+      <ul class="eaten">
+        {d.intake.flatMap((i) => i.meals.map((m) => (
+          <li key={m.id}>
+            <span>{d.intake.length > 1 ? `${i.person} · ` : ""}{MEALS[m.meal] || "Extra"}: {m.what}{m.source === "foto" ? " 📷" : ""}</span>
+            <span class="num small">{m.kcal} kcal
+              <button class="x" aria-label={`Apagar ${m.what}`} disabled={!!busy} onClick={() => act("meal_delete", { id: m.id })}>×</button>
+            </span>
+          </li>
+        )))}
+      </ul>
+      <div class="quick">
+        {planned.map((m) => (
+          <button key={m.meal} class="ghost" disabled={!!busy} onClick={() => act("meal", { meal: m.meal }, `meal-${m.meal}`)}>
+            Comi o {MEALS[m.meal].toLowerCase()} do cardápio
+          </button>
+        ))}
+        <button class="link" onClick={() => onAsk("Quero contar o que comi hoje")}>contar no chat</button>
+      </div>
+      <p class="muted small">Foto do prato: toque no 📷 do chat.</p>
+    </section>
+  );
+}
+
+function Score({ s, last }) {
+  const pct = s.max_so_far ? Math.round((s.points / s.max_so_far) * 100) : 0;
+  const diff = s.points - last;
+  return (
+    <section class="card">
+      <header class="card-head"><h2>Placar da semana</h2><span class="muted small">os dois somam juntos</span></header>
+      <div class="score">
+        <span class="big num">{s.points}</span>
+        <span class="muted small">de {s.max_so_far} possíveis até hoje · semana passada {last}{diff > 0 ? ` (+${diff} 🎉)` : ""}</span>
+      </div>
+      <div class="bar"><span style={{ width: `${pct}%` }} /></div>
+      <ul class="breakdown">
+        {s.breakdown.map((b) => <li key={b.what}><span>{b.what}</span><span class="num">{b.points} pts</span></li>)}
+      </ul>
+    </section>
   );
 }
 

@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
 import os
+import re
 import sqlite3
 import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from mcp.server.mcpserver.exceptions import ToolError
 from starlette.applications import Starlette
@@ -32,11 +37,15 @@ from grana_mcp.server import PRICES_ENV, GranaTools
 from grana_mcp.store import db
 from grana_mcp.sync import today_sp
 from grana_mcp.web import auth, history, usage
-from grana_mcp.web.claude_runner import RunnerConfig, prepare, run_turn
+from grana_mcp.web.claude_runner import RunnerConfig, estimate_photo, prepare, run_turn
 from grana_mcp.web.limits import AuthGuard, ChatLimits
 
 log = logging.getLogger(__name__)
 MAX_MESSAGE = 2000
+MAX_IMAGE = 1024 * 1024  # the phone sends ~768 px JPEGs (~60-150 kB)
+MAX_PHOTO_BODY = MAX_IMAGE * 4 // 3 + 16 * 1024
+_DATA_URL = re.compile(r"data:(image/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})")
+_MAGIC = {"image/jpeg": (b"\xff\xd8\xff",), "image/png": (b"\x89PNG",), "image/webp": (b"RIFF",)}
 STATIC_DIR = Path(__file__).parent / "static"  # built by web-ui/ (npm run build)
 SECURITY_HEADERS = {
     "Content-Security-Policy": (
@@ -147,13 +156,18 @@ def create_app(
 
     async def board_view(request: Request) -> Response:
         try:
-            await _user(request, state)
+            user = await _user(request, state)
         except Denied as d:
             return d.response
         try:
             data = GranaTools(config.db_path()).board()
         except ToolError as exc:
             return JSONResponse({"error": str(exc)}, status_code=503, headers=SECURITY_HEADERS)
+        try:  # the day's calories on the home screen (only when the diet is set up)
+            food = await asyncio.to_thread(kitchen(user).food_diary)
+            data["food_today"] = {k: food[k] for k in ("intake", "streaks", "week_score")}
+        except (KitchenError, sqlite3.Error):
+            pass
         return JSONResponse(data, headers=SECURITY_HEADERS)
 
     async def read_view(request: Request, fn: Callable[[GranaTools], dict[str, Any]]) -> Response:
@@ -293,6 +307,44 @@ def create_app(
             return JSONResponse({"error": str(exc)}, status_code=400, headers=SECURITY_HEADERS)
         return JSONResponse(data, headers=SECURITY_HEADERS)
 
+    async def food_photo(request: Request) -> Response:
+        """A plate photo -> a cheap one-shot estimate (never in the chat session) -> the
+        food diary. The photo is not stored anywhere."""
+        try:
+            user = await _user(request, state)
+        except Denied as d:
+            return d.response
+
+        def bad(msg: str, code: int = 400) -> Response:
+            return JSONResponse({"error": msg}, status_code=code, headers=SECURITY_HEADERS)
+
+        if int(request.headers.get("content-length") or 0) > MAX_PHOTO_BODY:
+            return bad("foto grande demais", 413)
+        try:
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError("corpo inválido")
+            image = photo(body.get("image"))
+            if image is None:
+                raise ValueError("mande a foto")
+            note = str(body.get("note") or "").strip()[:200] or None
+            meal = str(body.get("meal") or "") or meal_now()
+        except ValueError as exc:
+            return bad(str(exc))
+        wait = state.limits.take(user)
+        if wait:
+            return _too_many(f"limite de pedidos atingido; tente em {wait // 60 + 1} min", wait)
+        est, event = await estimate_photo(state.runner, *image, note)
+        _record_usage(user, event, 0)
+        if est is None:
+            return bad(str(event.get("message")), 502)
+        k = kitchen(user)
+        try:
+            out = await asyncio.to_thread(k.log_photo, est, meal)
+        except KitchenError as exc:
+            return bad(str(exc))
+        return JSONResponse(out, headers=SECURITY_HEADERS)
+
     async def kitchen_view(request: Request) -> Response:
         """GET: the Cozinha tab. POST /api/kitchen/<action>: small writes from the page."""
         try:
@@ -315,6 +367,10 @@ def create_app(
                     k.set_kitchen_rules(home_geohash=gh)
                 elif action == "market":
                     k.set_market(str(body.get("code", "")), bool(body.get("favorite", True)))
+                elif action == "meal":
+                    k.log_planned(str(body.get("meal", "")))
+                elif action == "meal_delete":
+                    k.delete_meal(int(body["id"]))
                 elif action == "discover":
                     await asyncio.to_thread(k.markets, True, True)  # the button means "again"
                 elif action == "prices":
@@ -511,6 +567,7 @@ def create_app(
         Route("/api/kitchen/prices/jobs", phone_prices),
         Route("/api/kitchen/prices/item", phone_prices, methods=["POST"]),
         Route("/api/kitchen/prices/done", phone_prices, methods=["POST"]),
+        Route("/api/kitchen/photo", food_photo, methods=["POST"]),
         Route("/api/kitchen/{action}", kitchen_view, methods=["POST"]),
         Route("/api/memory/delete", memory_view, methods=["POST"]),
         Route("/api/push/subscribe", push_change, methods=["POST"]),
@@ -553,6 +610,31 @@ def _record_usage(user: str, event: dict[str, Any], tools: int) -> None:
 
 
 MAX_PRICE_BODY = 1024 * 1024  # one item: up to 80 products
+
+
+def meal_now() -> str:
+    """The meal of the hour in São Paulo (a photo is usually taken while eating)."""
+    h = datetime.now(ZoneInfo("America/Sao_Paulo")).hour
+    return "cafe" if h < 11 else "almoco" if h < 15 else "lanche" if h < 18 else "jantar"
+
+
+def photo(value: Any) -> tuple[str, str] | None:
+    """A data: URL from the phone -> (media type, base64), checked; None if absent.
+    Raises ValueError for anything that isn't a small JPEG/PNG/WebP."""
+    if value is None or value == "":
+        return None
+    m = _DATA_URL.fullmatch(value) if isinstance(value, str) else None
+    if not m:
+        raise ValueError("foto inválida")
+    try:
+        raw = base64.b64decode(m.group(2), validate=True)
+    except binascii.Error:
+        raise ValueError("foto inválida") from None
+    if len(raw) > MAX_IMAGE or not raw.startswith(_MAGIC[m.group(1)]):
+        raise ValueError("foto inválida")
+    return m.group(1), m.group(2)
+
+
 HEARTBEAT = b": ping\n\n"  # SSE comment: ignored by the page, keeps proxies awake
 HEARTBEAT_S = 10.0
 

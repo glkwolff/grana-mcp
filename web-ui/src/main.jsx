@@ -142,7 +142,7 @@ function App() {
         )}
         <div class={tab === "board" && !detail ? "pane" : "pane hidden"}>
           <Board data={board} error={boardError} onAsk={askFromBoard}
-            onOpenCategory={openCategory("this_month")} onMore={() => go("insights")} />
+            onOpenCategory={openCategory("this_month")} onMore={() => go("insights")} onKitchen={() => go("kitchen")} />
           {board && <div class="board-tail"><Memory refresh={refresh} onUnauthorized={unauthorized} /><Notify /></div>}
         </div>
         {tab === "insights" && (

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import re
 import stat
@@ -12,6 +13,7 @@ from starlette.testclient import TestClient
 from typer.testing import CliRunner
 
 from grana_mcp import cli, config
+from grana_mcp.web import app as app_module
 from grana_mcp.web import auth
 from grana_mcp.web import claude_runner as cr
 from grana_mcp.web.app import create_app
@@ -22,8 +24,22 @@ NO_USAGE = dict.fromkeys(("input", "cache_read", "cache_write", "output", "turns
 FAKE_CLAUDE = r"""#!{python}
 import json, sys
 args = sys.argv[1:]
-msg = args[args.index("-p") + 1]
 def out(e): print(json.dumps(e), flush=True)
+if "--json-schema" in args:  # a food photo: one stream-json user message on stdin
+    assert "--no-session-persistence" in args and "--mcp-config" not in args
+    content = json.loads(sys.stdin.readline())["message"]["content"]
+    text = content[1]["text"]
+    est = {{"food": "gato" not in text, "description": "arroz, feijão e bife",
+           "items": [{{"name": "arroz", "portion": "4 colheres", "kcal": 200, "protein_g": 4}},
+                     {{"name": "bife", "portion": "120 g", "kcal": "muito", "protein_g": 30}}],
+           "kcal": 650.4, "protein_g": 38, "confidence": "talvez"}}
+    if "quebrado" in text:
+        out({{"type": "result", "subtype": "success", "is_error": False, "result": "x"}})
+    else:
+        out({{"type": "result", "subtype": "success", "is_error": False, "result": "",
+             "structured_output": est, "usage": {{"input_tokens": 1900}}}})
+    sys.exit(0)
+msg = args[args.index("-p") + 1]
 out({{"type": "system", "subtype": "init"}})
 if msg == "falha":
     out({{"type": "result", "subtype": "error_during_execution", "is_error": True}})
@@ -439,3 +455,48 @@ def test_identity_behind_serve(client: TestClient, monkeypatch: pytest.MonkeyPat
     assert me({}).json() == {"user": "ana"}  # browser on the PC itself
     assert me({"X-Forwarded-For": "lixo"}).json() == {"user": "ana"}
     assert auth.forwarded_peer("100.64.0.7") == "100.64.0.7" and auth.forwarded_peer("x") is None
+
+
+JPEG = "data:image/jpeg;base64," + base64.b64encode(b"\xff\xd8\xff\xe0" + b"x" * 60).decode()
+
+
+def test_food_photo_is_a_cheap_separate_call(client: TestClient) -> None:
+    from grana_mcp.store import db as store_db
+
+    conn = store_db.connect(config.db_path())
+    conn.execute("INSERT INTO people (id, display_name, created_at) VALUES ('ana', 'Ana', 'x')")
+    conn.commit()
+    conn.close()
+    h = {"Authorization": f"Bearer {auth.add_user('ana')}"}
+    r = client.post("/api/kitchen/photo", json={"image": JPEG, "meal": "almoco"}, headers=h)
+    out = r.json()
+    assert r.status_code == 200 and out["ok"] and out["meal"] == "almoco"
+    assert "650 kcal" in out["summary"] and out["confidence"] == "media"
+    assert out["items"][1] == {"name": "bife", "portion": "120 g", "kcal": 0}  # junk -> 0
+    conn = store_db.connect(config.db_path())
+    row = conn.execute("SELECT person_id, meal, kcal, protein_g, source FROM meal_log").fetchone()
+    conn.close()
+    assert tuple(row) == ("ana", "almoco", 650, 38, "foto")
+    not_food = {"image": JPEG, "note": "meu gato"}
+    assert client.post("/api/kitchen/photo", json=not_food, headers=h).json()["ok"] is False
+    broken = {"image": JPEG, "note": "quebrado"}
+    assert client.post("/api/kitchen/photo", json=broken, headers=h).status_code == 502
+
+    png_as_jpeg = "data:image/jpeg;base64," + base64.b64encode(b"\x89PNGxxxx").decode()
+    for bad in ("data:text/html;base64,PGI+", png_as_jpeg, "data:image/jpeg;base64,@@@", 7):
+        r = client.post("/api/kitchen/photo", json={"image": bad}, headers=h)
+        assert r.status_code == 400 and r.json()["error"] == "foto inválida"
+    assert client.post("/api/kitchen/photo", json={}, headers=h).status_code == 400
+    big = "x" * (app_module.MAX_PHOTO_BODY + 1)
+    r = client.post(
+        "/api/kitchen/photo", content=big, headers={**h, "Content-Type": "application/json"}
+    )
+    assert r.status_code == 413
+    assert client.post("/api/kitchen/photo", json={"image": JPEG}).status_code == 401
+    assert app_module.meal_now() in ("cafe", "almoco", "lanche", "jantar")
+
+
+def test_photo_command_is_minimal() -> None:
+    cmd = cr.photo_command(cr.RunnerConfig(claude_bin="c", workdir=Path("/w")))
+    assert cmd[cmd.index("--tools") + 1] == "" and "--no-session-persistence" in cmd
+    assert "--mcp-config" not in cmd and cmd[cmd.index("--model") + 1] == "haiku"

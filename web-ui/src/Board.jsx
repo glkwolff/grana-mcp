@@ -2,6 +2,7 @@
 // Tudo vem de /api/board como texto/valores; nada é renderizado como HTML.
 
 import { ago, brl, brlCents, cents, fmtDate, monthName } from "./fmt.js";
+import { FoodToday } from "./FoodRing.jsx";
 
 function Bar({ pct, tone }) {
   const w = Math.max(0, Math.min(pct, 100));
@@ -30,7 +31,7 @@ function Section({ title, hint, children, empty }) {
   );
 }
 
-export function Board({ data, error, onAsk, onOpenCategory, onMore }) {
+export function Board({ data, error, onAsk, onOpenCategory, onMore, onKitchen }) {
   if (error) return <div class="board"><div class="card error">{error}</div></div>;
   if (!data) return <div class="board"><div class="card skeleton" /><div class="card skeleton" /></div>;
 
@@ -68,6 +69,8 @@ export function Board({ data, error, onAsk, onOpenCategory, onMore }) {
           </div>
         )}
       </section>
+
+      {data.food_today && data.food_today.intake.length > 0 && <FoodToday food={data.food_today} onOpen={onKitchen} />}
 
       {data.notices.length > 0 && (
         <div class="notices">

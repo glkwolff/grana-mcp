@@ -10,7 +10,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult
 
 from grana_mcp import config
-from grana_mcp.kitchen import nutrition, prices, store
+from grana_mcp.kitchen import diary, nutrition, prices, store
 from grana_mcp.kitchen.service import KitchenTools
 from grana_mcp.server import build_server
 from grana_mcp.store import db
@@ -706,3 +706,104 @@ def test_units_and_kilos_by_the_households_equivalence(conn: sqlite3.Connection)
         k.set_unit_weight("limao")
     with pytest.raises(store.KitchenError):
         k.set_unit_weight("limao", grams=0)
+
+
+# --- food diary ---
+
+
+def test_food_diary_streaks_and_weekly_score(conn: sqlite3.Connection) -> None:
+    k = kt()
+    k.set_diet_profile("Ana", sex="F", birth_year=1994, height_cm=165, activity="leve",
+                       goal="perder")  # fmt: skip
+    k.log_weight("ana", 69, "2026-11-18")  # target: 1430 kcal
+    k.set_kitchen_rules(delivery_max_week=2)
+    k.log_meal("almoço", "arroz, feijão e frango", 800, 40, day="2026-11-16")
+    k.log_meal("jantar", "omelete", 600, 30, day="2026-11-16", from_menu=True)  # 1400: on target
+    k.log_meal("almoco", "salada", 500, day="2026-11-17")
+    k.log_meal("jantar", "sopa", 500, day="2026-11-17")  # 1000: logged, under the target
+    out = k.log_meal("cafe", "pão com ovo", 350.4, 18, from_photo=True)  # today: in progress
+    assert (
+        out["id"]
+        and "350 kcal" in out["summary"]
+        and "Ana: 350 kcal em 1 registro(s) de 1430" in out["summary"]
+    )
+    k.log_day(True)
+
+    d = k.food_diary()
+    (ana,) = d["intake"]
+    assert ana["kcal"] == 350 and ana["target_kcal"] == 1430 and ana["protein_g"] == 18
+    assert ana["meals"][0]["source"] == "foto" and ana["on_target"] is False
+    (s,) = d["streaks"]  # today doesn't break the streak while it's in progress
+    assert (s["logging_days"], s["logging_best"]) == (2, 2)
+    assert (s["on_target_days"], s["on_target_best"]) == (0, 1)
+    score = d["week_score"]
+    pts = {b["what"].split(" (")[0]: b["points"] for b in score["breakdown"]}
+    assert pts == {
+        "dias com refeições registradas": 2, "dias dentro da meta de kcal": 2,
+        "dias seguindo o cardápio": 1, "pesagens na semana": 2, "delivery dentro do limite": 5,
+    }  # fmt: skip
+    assert score["points"] == 12 and d["last_week_points"] == 5  # last week: no delivery
+    assert "Ana 350/1430 kcal" in d["summary"]
+    assert k.kitchen_status()["eaten_today"] == ["Ana: 350 kcal em 1 registro(s) de 1430"]
+    assert k.food_diary("2026-11-16")["intake"][0]["on_target"] is True
+    assert k.page()["diary"]["day"] == "2026-11-18"
+
+    assert "Apagado: pão com ovo" in k.delete_meal(out["id"])["summary"]
+    assert k.food_diary()["intake"][0]["kcal"] == 0
+    for bad in (
+        lambda: k.delete_meal(out["id"]),
+        lambda: k.log_meal("ceia", "x", 100),
+        lambda: k.log_meal("jantar", "x", 9000),
+        lambda: k.log_meal("jantar", "x", "muito"),
+        lambda: k.log_meal("jantar", "x", 100, protein_g=900),
+        lambda: k.log_meal("jantar", "  ", 100),
+        lambda: k.log_meal("jantar", "x", 100, day="2026-11-01"),  # too far back
+        lambda: k.log_meal("jantar", "x", 100, day="2026-11-19"),  # future
+        lambda: k.log_meal("jantar", "x", 100, person="Carla"),
+        lambda: kt(actor=None).log_meal("jantar", "x", 100),
+        lambda: k.food_diary("ontem"),
+    ):
+        with pytest.raises(store.KitchenError):
+            bad()
+
+
+def test_streak_runs() -> None:
+    assert diary._run([]) == (0, 0)
+    assert diary._run([True, True, False, True]) == (1, 2)
+    assert diary._run([True, True, True, False]) == (3, 3)  # today not done yet
+    assert diary._run([True, False, False]) == (0, 1)
+
+
+def test_one_tap_menu_meal_and_page_actions(conn: sqlite3.Connection, tmp_path: Any) -> None:
+    from starlette.testclient import TestClient
+
+    from grana_mcp.web import auth
+    from grana_mcp.web import claude_runner as cr
+    from grana_mcp.web.app import create_app
+
+    monday = KitchenTools(config.db_path(), lambda: date(2026, 11, 16), lambda: "ana")
+    monday.set_diet_profile("Ana", sex="F", birth_year=1994, height_cm=165, activity="leve",
+                            goal="perder")  # fmt: skip
+    monday.log_weight("ana", 69, "2026-11-16")
+    monday.set_meal_plan(MEALS, MONDAY)
+    out = monday.log_planned("almoço")  # 650 kcal x Ana's portion
+    portion = monday.kitchen_status()["people"][0]["portion"]
+    (ana,) = monday.food_diary()["intake"]
+    assert ana["kcal"] == round(650 * portion) and ana["meals"][0]["source"] == "cardapio"
+    assert "Arroz, feijão e ovo" in out["summary"]
+    with pytest.raises(store.KitchenError, match="sem kcal no cardápio"):
+        monday.log_planned("jantar")  # nothing planned
+
+    app = create_app(cr.RunnerConfig(claude_bin="/bin/false", workdir=tmp_path), shops=FakeShops())
+    client = TestClient(app)
+    h = {"Authorization": f"Bearer {auth.add_user('ana')}"}
+    page = client.get("/api/kitchen", headers=h).json()
+    assert "intake" in page["diary"] and "week_score" in page["diary"]
+    board = client.get("/api/board", headers=h)
+    assert board.status_code == 200, board.text
+    assert board.json()["food_today"]["intake"][0]["person"] == "Ana"
+    meal_id = ana["meals"][0]["id"]
+    r = client.post("/api/kitchen/meal_delete", json={"id": meal_id}, headers=h)
+    assert r.status_code == 200
+    assert monday.food_diary()["intake"][0]["meals"] == []
+    assert client.post("/api/kitchen/meal_delete", json={}, headers=h).status_code == 400
