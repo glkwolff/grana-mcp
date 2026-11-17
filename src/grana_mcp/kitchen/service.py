@@ -17,7 +17,7 @@ import httpx
 
 from grana_mcp.analytics import queries
 from grana_mcp.analytics.periods import Period
-from grana_mcp.kitchen import diary, nutrition, places, prices, store
+from grana_mcp.kitchen import diary, nutrition, places, prices, receipt, store
 from grana_mcp.money import format_brl
 from grana_mcp.privacy.redact import sanitize_text
 from grana_mcp.store import db
@@ -81,12 +81,14 @@ class KitchenTools:
         actor: Callable[[], str | None] = lambda: None,
         fetch: prices.Fetcher | None = None,
         shops: places.Fetcher | None = None,
+        receipts: receipt.Fetcher = receipt.fetch_page,
     ) -> None:
         self.db_path = db_path
         self.today = today
         self.actor = actor
         self.fetch = fetch
         self.shops = shops
+        self.receipts = receipts
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -728,6 +730,52 @@ class KitchenTools:
                 prices.set_category(conn, term, category)
             n = prices.store_results(conn, term, rows)
         return {"ok": True, "term": term, "offers": n}
+
+    def read_receipt(self, qr: Any) -> dict[str, Any]:
+        """The QR code of a receipt (NFC-e, Paraná): every item's price, in that store and
+        day, from the tax office's public page of the receipt."""
+        key, url = receipt.parse_qr(str(qr or ""))
+        salt = db.load_or_create_salt(self.db_path.parent)
+        key_hash = db.hash_doc(key, salt)
+        with self._conn() as conn:
+            old = receipt.seen(conn, key_hash)
+        if old:
+            return {
+                "ok": True,
+                "already": True,
+                "summary": f"Essa nota ({old['store']}, {old['day'][8:10]}/{old['day'][5:7]}) "
+                "já tinha sido lida.",
+            }
+        r = receipt.parse_page(self.receipts(url))
+        with self._conn() as conn:
+            if receipt.seen(conn, key_hash):  # read twice at the same time
+                return {"ok": True, "already": True, "summary": "Essa nota já tinha sido lida."}
+            receipt.store_receipt(conn, r, key_hash, salt, self.actor())
+            terms = self._price_terms(conn, None)
+        covered = sorted({t for t in terms for line in r.lines if prices.relevant(line.descr, t)})
+        merged: dict[tuple[str, str, int], float] = {}  # the same product on several lines
+        for x in r.lines:
+            k = (x.descr, x.unit, x.unit_cents)
+            merged[k] = merged.get(k, 0.0) + x.qty
+        total = format_brl(r.total_cents) if r.total_cents else None
+        day = r.issued.strftime("%d/%m")
+        summary = f"Nota do {r.store} ({day}): {len(merged)} produto(s) com preço anotado"
+        summary += f", total {total}." if total else "."
+        if covered:
+            summary += f" Da lista da semana: {', '.join(covered[:12])}."
+        return {
+            "ok": True,
+            "store": r.store,
+            "day": r.issued.date().isoformat(),
+            "items": len(merged),
+            "total": total,
+            "list_items": covered,
+            "lines": [
+                {"what": d, "qty": round(q, 3), "unit": u, "price": format_brl(c)}
+                for (d, u, c), q in list(merged.items())[:60]
+            ],
+            "summary": summary,
+        }
 
     def markets(self, discover: bool = False, refresh: bool = False) -> dict[str, Any]:
         cached = ""

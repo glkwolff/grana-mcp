@@ -28,7 +28,7 @@ from starlette.routing import BaseRoute, Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from grana_mcp import config, memory
-from grana_mcp.kitchen import geo, places, prices
+from grana_mcp.kitchen import geo, places, prices, receipt
 from grana_mcp.kitchen.service import KitchenTools
 from grana_mcp.kitchen.store import KitchenError
 from grana_mcp.notify import push
@@ -50,9 +50,11 @@ STATIC_DIR = Path(__file__).parent / "static"  # built by web-ui/ (npm run build
 SECURITY_HEADERS = {
     "Content-Security-Policy": (
         # Menor Preço: the phone looks prices up itself (see web-ui/src/phonePrices.js).
-        "default-src 'self'; script-src 'self'; style-src 'self'; "
+        # blob: photos are opened from a local blob URL to be shrunk (or QR-read) on the phone;
+        # wasm-unsafe-eval: the QR reader (ZXing) is WebAssembly served by this app.
+        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; "
         "connect-src 'self' https://menorpreco.notaparana.pr.gov.br; "
-        "img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+        "img-src 'self' data: blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
     ),
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
@@ -80,6 +82,8 @@ class State:
     running: dict[str, asyncio.Task[None]] = field(default_factory=dict)  # thread -> turn
     prices: prices.Fetcher | None = None
     shops: places.Fetcher | None = places.overpass
+    receipts: receipt.Fetcher | None = None  # None: the real tax-office page
+    receipt_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def session(self, user: str) -> Session:
         return self.sessions.setdefault(user, Session())
@@ -137,8 +141,10 @@ def create_app(
     limits: ChatLimits | None = None,
     price_source: prices.Fetcher | None = None,
     shops: places.Fetcher | None = None,
+    receipts: receipt.Fetcher | None = None,
 ) -> Starlette:
     state = State(runner or RunnerConfig(), limits or ChatLimits())
+    state.receipts = receipts
     if shops is not None:
         state.shops = shops
     if price_source is not None:
@@ -274,7 +280,11 @@ def create_app(
         return JSONResponse({"notes": notes, "max": memory.MAX_NOTES}, headers=SECURITY_HEADERS)
 
     def kitchen(user: str) -> KitchenTools:
-        return KitchenTools(config.db_path(), today_sp, lambda: user, state.prices, state.shops)
+        if state.receipts is None:
+            return KitchenTools(config.db_path(), today_sp, lambda: user, state.prices, state.shops)
+        return KitchenTools(
+            config.db_path(), today_sp, lambda: user, state.prices, state.shops, state.receipts
+        )
 
     async def phone_prices(request: Request) -> Response:
         """The phone looks prices up itself (its own connection, a few requests at a human
@@ -344,6 +354,24 @@ def create_app(
         except KitchenError as exc:
             return bad(str(exc))
         return JSONResponse(out, headers=SECURITY_HEADERS)
+
+    async def read_receipt(request: Request) -> Response:
+        """The QR code (or link) of a receipt -> its prices. No model call."""
+        try:
+            user = await _user(request, state)
+        except Denied as d:
+            return d.response
+        try:
+            if int(request.headers.get("content-length") or 0) > MAX_PRICE_BODY:
+                raise ValueError("corpo grande demais")
+            body = await request.json()
+            if not isinstance(body, dict):
+                raise ValueError("corpo inválido")
+            async with state.receipt_lock:  # one at a time to the tax office
+                data = await asyncio.to_thread(kitchen(user).read_receipt, body.get("qr"))
+        except (KitchenError, ValueError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400, headers=SECURITY_HEADERS)
+        return JSONResponse(data, headers=SECURITY_HEADERS)
 
     async def kitchen_view(request: Request) -> Response:
         """GET: the Cozinha tab. POST /api/kitchen/<action>: small writes from the page."""
@@ -568,6 +596,7 @@ def create_app(
         Route("/api/kitchen/prices/item", phone_prices, methods=["POST"]),
         Route("/api/kitchen/prices/done", phone_prices, methods=["POST"]),
         Route("/api/kitchen/photo", food_photo, methods=["POST"]),
+        Route("/api/kitchen/receipt", read_receipt, methods=["POST"]),
         Route("/api/kitchen/{action}", kitchen_view, methods=["POST"]),
         Route("/api/memory/delete", memory_view, methods=["POST"]),
         Route("/api/push/subscribe", push_change, methods=["POST"]),

@@ -8,7 +8,8 @@
     "build": "vite build"
   },
   "dependencies": {
-    "preact": "10.29.8"
+    "preact": "10.29.8",
+    "zxing-wasm": "2.1.2"
   },
   "devDependencies": {
     "@babel/core": "7.29.13",

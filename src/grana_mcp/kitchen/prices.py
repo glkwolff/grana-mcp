@@ -45,6 +45,7 @@ NOTED_DAYS = 0
 # descriptions and ids of 20-45 chars (the length varies, so it alone is not enough).
 POISONED_CODE_LEN = 70
 LOCAL_PREFIXES = ("osm:", "manual:")  # markets not from the receipt source
+RECEIPT_PREFIX = "nfce:"  # stores from the household's own receipts (kitchen/receipt.py)
 BY_WEIGHT = ("por kg", "por l")  # suffix of a noted price that is per kg/l, any amount
 CONNECT_TIMEOUT_S = 3.0
 CONNECT_TRIES = 4
@@ -188,6 +189,13 @@ def relevant(descr: str, term: str) -> bool:
         if hit and not any(a.startswith(hit) for a in asked):
             return False
     return True
+
+
+def _noun_prefix(term: str) -> str:
+    """The part of the first search word relevant() requires at the start of a receipt line."""
+    words = fold(term).split()
+    key = words[0] if words else ""
+    return key[:4] if len(key) > 4 else key[:3]
 
 
 def fold(text: str) -> str:
@@ -437,8 +445,9 @@ def offers(
     rows = conn.execute(
         "SELECT o.market, m.name, o.descr, o.cents, o.size, o.unit, o.sold_at, o.gtin, "
         "o.fetched_at FROM price_obs o JOIN markets m ON m.code = o.market "
-        "WHERE o.search = ? AND o.sold_at >= ?",
-        (term, min(since, since_noted)),
+        "WHERE (o.search = ? OR (o.market LIKE 'nfce:%' AND o.search LIKE ?)) "
+        "AND o.sold_at >= ?",
+        (term, _noun_prefix(term) + "%", min(since, since_noted)),
     ).fetchall()
     out: list[Offer] = []
     receipts: list[Offer] = []
@@ -447,6 +456,7 @@ def offers(
     for r in rows:
         if shops is not None and r[0] not in shops:
             continue
+        own = str(r[0]).startswith(RECEIPT_PREFIX)  # the household's own receipt (QR code)
         noted = str(r[0]).startswith(LOCAL_PREFIXES)
         if noted:
             if r[6] < since_noted or not r[4] or not r[5]:
@@ -457,7 +467,7 @@ def offers(
             loose = str(r[2]).endswith(BY_WEIGHT)
             out.append(Offer(r[0], r[1], r[2], r[3], size, u, r[6], loose, per_un))
             continue
-        if r[6] < since or r[8] < fetched_since or not relevant(r[2], term):
+        if r[6] < since or (r[8] < fetched_since and not own) or not relevant(r[2], term):
             continue
         size, u = r[4], r[5]
         loose = is_loose(r[2])
@@ -473,7 +483,7 @@ def offers(
         size, u, per_un = _convert(float(size), u, unit, eq)
         if u != unit:
             continue
-        if not favorites and not r[7] and not loose:
+        if not favorites and not r[7] and not loose and not own:
             continue  # without favorites: barcoded or sold-by-weight only (keeps restaurants out)
         receipts.append(Offer(r[0], r[1], r[2], r[3], float(size), u, r[6], loose, per_un))
     return out + drop_outliers(receipts)
@@ -629,7 +639,8 @@ def nearby_markets(conn: sqlite3.Connection, limit: int = 40) -> list[sqlite3.Ro
     return conn.execute(
         "SELECT m.code, m.name, m.address, m.dist_km, m.favorite, m.kind, COUNT(o.id) AS n "
         "FROM markets m LEFT JOIN price_obs o ON o.market = m.code "
-        "WHERE m.code LIKE 'osm:%' OR m.code LIKE 'manual:%' OR o.gtin IS NOT NULL "
+        "WHERE m.code LIKE 'osm:%' OR m.code LIKE 'manual:%' OR m.code LIKE 'nfce:%' "
+        "OR o.gtin IS NOT NULL "
         "GROUP BY m.code ORDER BY m.favorite DESC, m.dist_km IS NULL, m.dist_km LIMIT ?",
         (limit,),
     ).fetchall()

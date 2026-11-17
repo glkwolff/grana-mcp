@@ -3,6 +3,7 @@ import { api, getJSON, streamChat, Unauthorized } from "./api.js";
 import { Markdown } from "./markdown.jsx";
 import { enablePush } from "./Notify.jsx";
 import { photoText, postPhoto, shrink } from "./photo.js";
+import { findQr, isReceiptQr, postReceipt, receiptLink, receiptText } from "./receipt.js";
 import { lookupPrices, summary } from "./phonePrices.js";
 
 const TOOL_LABELS = {
@@ -294,6 +295,28 @@ export function Chat({ messages, setMessages, thread, setThread, pending, onDone
     setList((l) => (l || []).filter((t) => t.id !== id));
   }
 
+  // A receipt's QR code (photo) or link: read by the app, no model call.
+  async function sendReceipt(qr, shown) {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    const id = Date.now();
+    setMessages((m) => [...m, { role: "me", text: shown }, { role: "bot", id, text: "", status: "lendo a nota na Sefaz…" }]);
+    scroll(true);
+    try {
+      const r = await postReceipt(qr);
+      patchMsg(id, () => ({ text: receiptText(r), status: null }));
+    } catch (e) {
+      if (e instanceof Unauthorized) return onUnauthorized();
+      patchMsg(id, () => ({ error: e.message, status: null }));
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+      onDone(true);
+      scroll();
+    }
+  }
+
   function submit(e) {
     e.preventDefault();
     const q = text.trim();
@@ -301,7 +324,9 @@ export function Chat({ messages, setMessages, thread, setThread, pending, onDone
     setText("");
     const image = photo;
     setPhoto(null);
+    const link = image ? null : receiptLink(q);
     if (image) sendPhoto(image, q);
+    else if (link) sendReceipt(link, q);
     else ask(q);
   }
 
@@ -309,7 +334,12 @@ export function Chat({ messages, setMessages, thread, setThread, pending, onDone
     const file = e.currentTarget.files?.[0];
     e.currentTarget.value = "";
     setPhotoErr("");
-    try { if (file) setPhoto(await shrink(file)); } catch (err) { setPhotoErr(err.message); }
+    if (!file) return;
+    try {
+      const qr = await findQr(file).catch(() => null);
+      if (qr && isReceiptQr(qr)) return sendReceipt(qr, "🧾 nota fiscal (QR Code)");
+      setPhoto(await shrink(file));
+    } catch (err) { setPhotoErr(err.message); }
   }
 
   return (
@@ -346,7 +376,7 @@ export function Chat({ messages, setMessages, thread, setThread, pending, onDone
         </div>
       )}
       <form class="ask" onSubmit={submit}>
-        <label class="cam" aria-label="Mandar foto da refeição" title="Mandar foto da refeição">
+        <label class="cam" aria-label="Foto do prato ou QR Code da nota" title="Foto do prato ou QR Code da nota">
           <input type="file" accept="image/*" onChange={pick} disabled={busy} hidden />
           <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M9 4h6l1.5 2H20a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h3.5zM12 9a4 4 0 1 0 0 8 4 4 0 0 0 0-8z" fill="currentColor" /></svg>
         </label>

@@ -500,3 +500,24 @@ def test_photo_command_is_minimal() -> None:
     cmd = cr.photo_command(cr.RunnerConfig(claude_bin="c", workdir=Path("/w")))
     assert cmd[cmd.index("--tools") + 1] == "" and "--no-session-persistence" in cmd
     assert "--mcp-config" not in cmd and cmd[cmd.index("--model") + 1] == "haiku"
+
+
+def test_receipt_route_reads_qr_without_the_model(tmp_path: Path) -> None:
+    from tests.test_kitchen import NFCE_PAGE, NFCE_QR
+
+    cfg = cr.RunnerConfig(claude_bin="/bin/false", workdir=tmp_path)  # no model call
+    client = TestClient(create_app(cfg, receipts=lambda url: NFCE_PAGE))
+    h = {"Authorization": f"Bearer {auth.add_user('ana')}"}
+    r = client.post("/api/kitchen/receipt", json={"qr": NFCE_QR}, headers=h)
+    assert r.status_code == 200, r.text
+    assert r.json()["items"] == 3
+    bad = client.post("/api/kitchen/receipt", json={"qr": "https://x.com/?p=1"}, headers=h)
+    assert bad.status_code == 400
+    assert client.post("/api/kitchen/receipt", json={"qr": NFCE_QR}).status_code == 401
+
+
+def test_csp_lets_the_phone_open_photos_it_picked(client: TestClient) -> None:
+    """photo.js/receipt.js read the picked file through a blob: URL before sending it."""
+    csp = client.get("/").headers["Content-Security-Policy"]
+    img = next(d for d in csp.split(";") if d.strip().startswith("img-src")).split()
+    assert "blob:" in img and "*" not in img

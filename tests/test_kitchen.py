@@ -807,3 +807,112 @@ def test_one_tap_menu_meal_and_page_actions(conn: sqlite3.Connection, tmp_path: 
     assert r.status_code == 200
     assert monday.food_diary()["intake"][0]["meals"] == []
     assert client.post("/api/kitchen/meal_delete", json={}, headers=h).status_code == 400
+
+
+# --- receipts (NFC-e QR code) -------------------------------------------------------------
+
+NFCE_KEY = "41261112345678000100650010000001231000000010"
+NFCE_QR = f"http://www.fazenda.pr.gov.br/nfce/qrcode?p={NFCE_KEY}|2|1|1|ABC123DEF"
+
+
+def nfce_item(n: int, descr: str, qty: str, unit: str, price: str, total: str) -> str:
+    return (
+        f'<tr id="Item + {n}">\n <td valign="top">\n  <span class="txtTit2">{descr}</span>'
+        f'<span class="RCod">(Código: {n}00 )</span><br/>'
+        f'<span class="Rqtd"><strong>Qtde.:</strong>{qty}</span>'
+        f'<span class="RUN"><strong>UN: </strong>{unit}</span>'
+        f'<span class="RvlUnit"><strong>Vl. Unit.:</strong>&nbsp;{price}</span></td>'
+        f'<td align="right" valign="top" class="txtTit3 noWrap">Vl. Total\n<br></br>'
+        f'<span class="valor">{total}</span></td></tr>'
+    )
+
+
+NFCE_PAGE = (
+    '<html><body><div id="conteudo"><div class="txtCenter">'
+    '<div id="u20" class="txtTopo">SUPERMERCADO EXEMPLO LTDA</div>'
+    '<div class="text">CNPJ: 12.345.678/0001-00</div>'
+    '<div class="text">RUA DE TESTE,\n\t\t100,\n\t\t,\n\t\tCENTRO,\n\t\t'
+    "CURITIBA,\n\t\tPR</div></div>"
+    '<table id="tabResult">'
+    + nfce_item(1, "ARROZ T1 TIO EXEMPLO 5KG", "1", "UN", "24,90", "24,90")
+    + nfce_item(2, "TOMATE ITALIANO", "0,734", "KG", "8,99", "6,60")
+    + nfce_item(3, "CEBOLA EM PO 50G", "1", "UN", "3,49", "3,49")
+    + '</table><div id="totalNota"><div id="linhaTotal"><label>Valor a pagar R$:</label>'
+    '<span class="totalNumb txtMax">34,99</span></div></div>'
+    '<div id="infos"><ul><li><strong> Número: </strong>123 <strong> Série: </strong>1'
+    "<strong> Emissão: </strong>17/11/2026 18:30:12 - Via Consumidor</li></ul></div>"
+    "</div></body></html>"
+)  # synthetic, same layout as the tax office's public page
+
+
+def test_parse_qr_accepts_only_parana_nfce() -> None:
+    from grana_mcp.kitchen import receipt
+
+    key, url = receipt.parse_qr(NFCE_QR)
+    assert key == NFCE_KEY and len(key) == 44
+    assert url == f"https://www.fazenda.pr.gov.br/nfce/qrcode?p={NFCE_KEY}|2|1|1|ABC123DEF"
+    assert receipt.parse_qr(f"{NFCE_KEY}|2|1|1|ABC")[0] == NFCE_KEY  # the bare QR text
+    bad = [
+        "",
+        "https://evil.example.com/nfce/qrcode?p=" + NFCE_KEY + "|2|1",  # other host
+        "http://www.fazenda.pr.gov.br/nfce/qrcode?p=123|2",  # not a key
+        "35" + NFCE_KEY[2:] + "|2|1",  # São Paulo
+        NFCE_KEY[:20] + "55" + NFCE_KEY[22:] + "|2|1",  # NF-e, not NFC-e
+        NFCE_KEY,  # the key alone can't be looked up
+        NFCE_KEY + "|2|<script>",
+    ]
+    for text in bad:
+        with pytest.raises(store.KitchenError):
+            receipt.parse_qr(text)
+
+
+def test_parse_page_reads_store_date_and_items() -> None:
+    from grana_mcp.kitchen import receipt
+
+    r = receipt.parse_page(NFCE_PAGE)
+    assert r.store == "SUPERMERCADO EXEMPLO LTDA" and r.cnpj == "12345678000100"
+    assert r.address == "RUA DE TESTE, 100, CENTRO, CURITIBA, PR"
+    assert r.issued.isoformat() == "2026-11-17T18:30:12" and r.total_cents == 34_99
+    assert [(x.descr, x.qty, x.unit, x.unit_cents) for x in r.lines] == [
+        ("ARROZ T1 TIO EXEMPLO 5KG", 1.0, "UN", 24_90),
+        ("TOMATE ITALIANO", 0.734, "KG", 8_99),
+        ("CEBOLA EM PO 50G", 1.0, "UN", 3_49),
+    ]
+    error_page = (
+        '<div id="flashMessage"><font color="black">Atenção<br/>Atenção. Não foi possível '
+        "executar a operação: Url do QRCode mal formatado</font></div>"
+    )
+    with pytest.raises(store.KitchenError, match="mal formatado"):
+        receipt.parse_page(error_page)
+    with pytest.raises(store.KitchenError, match="diferente"):
+        receipt.parse_page("<html>outra coisa</html>")
+
+
+def test_read_receipt_stores_prices_once(conn: sqlite3.Connection) -> None:
+    fetched: list[str] = []
+
+    def fake(url: str) -> str:
+        fetched.append(url)
+        return NFCE_PAGE
+
+    k = KitchenTools(config.db_path(), lambda: TODAY, lambda: "ana", receipts=fake)
+    k.set_meal_plan(MEALS, MONDAY)
+    out = k.read_receipt(NFCE_QR)
+    assert out["items"] == 3 and out["total"] == "R$ 34,99"
+    assert "SUPERMERCADO EXEMPLO" in out["summary"] and "arroz" in out["list_items"]
+    again = k.read_receipt(NFCE_QR)
+    assert again["already"] and len(fetched) == 1  # not fetched twice
+
+    # The CNPJ and the receipt key are kept only as salted hashes.
+    dump = "\n".join(conn.iterdump())
+    assert "12345678000100" not in dump and NFCE_KEY not in dump
+    (code, fav) = conn.execute("SELECT code, favorite FROM markets").fetchone()
+    assert code.startswith("nfce:") and fav == 1
+
+    # The prices count for any search term, for 7 days, as the household's store.
+    (rice,) = prices.offers(conn, "arroz", "kg", TODAY)
+    assert rice.cents == 24_90 and rice.size == 5 and rice.market == code
+    (tomato,) = prices.offers(conn, "tomate", "kg", TODAY)
+    assert tomato.cents == 8_99 and tomato.size == 1 and tomato.loose
+    assert prices.offers(conn, "cebola", "kg", TODAY) == []  # 'CEBOLA EM PO' is not onion
+    assert prices.offers(conn, "arroz", "kg", date(2026, 11, 30)) == []  # too old by then

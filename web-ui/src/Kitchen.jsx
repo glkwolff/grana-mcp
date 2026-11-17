@@ -197,7 +197,7 @@ export function Kitchen({ onAsk, onUnauthorized, refresh }) {
               <button class="ghost" disabled={!!busy} onClick={() => act("discover", {}, "discover")}>{busy === "discover" ? "procurando…" : "Procurar mercados"}</button>
               <button class="link" disabled={!!busy} onClick={locate}>mudar localização</button>
             </div>
-            <p class="muted small">★ = onde vocês compram (a lista de compras usa os preços anotados neles). Para anotar um preço, conte no chat: "arroz 5 kg 27,90 no Zamprogna".</p>
+            <p class="muted small">★ = onde vocês compram (a lista de compras usa os preços anotados neles). Para anotar um preço, conte no chat: "arroz 5 kg 27,90 no Zamprogna", ou mande a foto do QR Code da nota pelo 📷 do chat (anota todos os itens de uma vez).</p>
           </>
         )}
       </section>
@@ -325,7 +325,7 @@ function Shopping({ s }) {
         </div>
       ))}
       {s.prices_failed > 0 && <p class="muted small">{s.prices_failed} item(ns) sem resposta da fonte de preços agora.</p>}
-      <p class="muted small">Só entram preços de hoje: do Menor Preço (buscados por este celular, devagar) e os que vocês anotarem no chat. Sem preço de hoje, o item fica sem preço.</p>
+      <p class="muted small">Entram os preços de hoje do Menor Preço (buscados por este celular, devagar), os anotados no chat e os das notas de vocês dos últimos 7 dias (📷 do chat no QR Code do cupom).</p>
     </>
   );
 }
