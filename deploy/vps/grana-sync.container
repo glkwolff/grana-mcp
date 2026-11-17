@@ -1,11 +1,11 @@
 [Unit]
-Description=grana sync (Meu Pluggy -> SQLite)
+Description=grana sync (Meu Pluggy -> SQLite) quando alguma conexão atualizou
 After=network-online.target
 
 [Container]
 Image=localhost/grana-web:latest
 UserNS=keep-id:uid=1000,gid=1000
-Exec=grana-mcp sync
+Exec=grana-mcp sync --if-updated
 Volume=%h/grana/config:/data/config:ro
 Volume=%h/grana/data:/data/data
 Secret=grana-pluggy-id,type=env,target=GRANA_PLUGGY_CLIENT_ID

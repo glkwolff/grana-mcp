@@ -38,7 +38,7 @@ from grana_mcp.providers import ofx
 from grana_mcp.providers.base import Item
 from grana_mcp.providers.pluggy import PluggyAuthError, PluggyClient, PluggyError
 from grana_mcp.store import db
-from grana_mcp.sync import sync_profile, today_sp
+from grana_mcp.sync import changed_items, sync_profile, today_sp
 
 CONSENT_WARN_DAYS = 30
 
@@ -188,6 +188,15 @@ def sync(
             "para reconhecer transferências internas.",
         ),
     ] = True,
+    if_updated: Annotated[
+        bool,
+        typer.Option(
+            "--if-updated",
+            help="Só sincroniza se o Meu Pluggy atualizou alguma conexão depois do último "
+            "sync (uma consulta leve por item; sync completo pelo menos 1x/dia). Para rodar "
+            "a cada 15 min.",
+        ),
+    ] = False,
 ) -> None:
     """Baixa até 365 dias de transações para o SQLite local."""
     profiles = config.load_profiles()
@@ -202,6 +211,7 @@ def sync(
 
     store = open_store()
     failed = False
+    ran = False
     for p in profiles:
         try:
             creds = config.load_credentials(p.id)
@@ -209,9 +219,15 @@ def sync(
             typer.echo(f"[{p.id}] {exc}", err=True)
             failed = True
             continue
-        typer.echo(f"[{p.id}] sincronizando {len(p.item_ids)} item(ns)...")
         try:
             with make_client(creds) as client:
+                if if_updated:
+                    changed = changed_items(store, client, p)
+                    if not changed:
+                        continue  # quiet: this runs every 15 minutes
+                    typer.echo(f"[{p.id}] {len(changed)} conexão(ões) atualizada(s) na Pluggy.")
+                typer.echo(f"[{p.id}] sincronizando {len(p.item_ids)} item(ns)...")
+                ran = True
                 r = sync_profile(store, client, p, identity=identity)
         except PluggyError as exc:
             typer.echo(f"[{p.id}] erro: {exc}", err=True)
@@ -235,7 +251,8 @@ def sync(
         for w in r.warnings:
             typer.echo(f"[{p.id}] aviso: {w}")
     # Dedupe of the whole database, also when a profile failed.
-    _run_pipeline(store.conn)
+    if ran or not if_updated:
+        _run_pipeline(store.conn)
     store.conn.close()
     if failed:
         raise typer.Exit(1)

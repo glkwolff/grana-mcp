@@ -78,6 +78,43 @@ def _learn_identity(
     result.identities_learned += 1
 
 
+# A full sync at least this often, even if no item says it changed.
+FULL_SYNC_EVERY = timedelta(hours=24)
+
+
+def _when(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    t = datetime.fromisoformat(value)
+    return t if t.tzinfo else t.replace(tzinfo=UTC)
+
+
+def changed_items(
+    store: Store, provider: Provider, profile: Profile, now: datetime | None = None
+) -> list[str]:
+    """Items the provider refreshed after our last sync of them (one light GET per item:
+    Meu Pluggy refreshes each item once a day, at a time of its own). Every item when the
+    profile's last good sync is older than FULL_SYNC_EVERY."""
+    now = now or datetime.now(UTC)
+    row = store.conn.execute(
+        "SELECT MAX(finished_at) FROM sync_runs WHERE profile_id = ? AND status = 'ok'",
+        (profile.id,),
+    ).fetchone()
+    last_ok = _when(row[0] if row else None)
+    if last_ok is None or now - last_ok >= FULL_SYNC_EVERY:
+        return list(profile.item_ids)
+    out = []
+    for item_id in profile.item_ids:
+        seen = store.conn.execute(
+            "SELECT last_synced_at FROM items WHERE id = ?", (item_id,)
+        ).fetchone()
+        synced = _when(seen[0] if seen else None)
+        item = provider.get_item(item_id)
+        if synced is None or (item.last_updated_at is not None and item.last_updated_at > synced):
+            out.append(item_id)
+    return out
+
+
 def sync_profile(
     store: Store,
     provider: Provider,

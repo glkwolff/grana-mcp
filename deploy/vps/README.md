@@ -1,7 +1,7 @@
 # grana numa VPS (usuário `grana`, Podman rootless, só no Tailscale)
 
 Tudo roda da mesma imagem (`podman build -f deploy/Containerfile -t grana-web .`):
-o chat web, o sync diário e os avisos. Nenhuma porta pública: o web escuta em
+o chat web, o sync (olha a Pluggy a cada 15 min) e os avisos. Nenhuma porta pública: o web escuta em
 127.0.0.1 e o `tailscale serve` publica `https://<máquina>.<tailnet>.ts.net`.
 
 Segredos como `podman secret` do usuário `grana` (arquivo 0600 no home dele):

@@ -1,9 +1,9 @@
 [Unit]
-Description=grana sync diário
+Description=grana sync: olha a Pluggy a cada 15 min (sync completo só quando o Meu Pluggy atualizou, e pelo menos 1x/dia)
 
 [Timer]
-OnCalendar=*-*-* 07:30:00
-RandomizedDelaySec=15min
+OnCalendar=*:0/15
+RandomizedDelaySec=60
 Persistent=true
 
 [Install]

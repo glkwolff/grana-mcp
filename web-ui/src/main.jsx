@@ -9,6 +9,7 @@ import { Kitchen } from "./Kitchen.jsx";
 import { Memory } from "./Memory.jsx";
 import { Notify, registerServiceWorker } from "./Notify.jsx";
 import "./styles.css";
+import { watchUpdates } from "./update.js";
 
 function Login({ onLogin, error }) {
   const [value, setValue] = useState("");
@@ -191,3 +192,4 @@ function App() {
 }
 
 render(<App />, document.getElementById("app"));
+watchUpdates();

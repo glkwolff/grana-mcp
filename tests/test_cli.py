@@ -232,3 +232,38 @@ def test_init_wizard(fake: FakePluggy, monkeypatch: pytest.MonkeyPatch) -> None:
     assert "8 novas" in result.output
     assert "claude mcp add grana -- uvx grana-mcp serve" in result.output
     assert CLIENT_SECRET not in result.output
+
+
+def test_sync_if_updated_only_when_pluggy_refreshed(fake: FakePluggy) -> None:
+    from grana_mcp.sync import changed_items
+
+    _add_profile()
+    first = runner.invoke(cli.app, ["sync", "--if-updated"])  # never synced: full sync
+    assert first.exit_code == 0, first.output
+    assert "8 novas" in first.output
+
+    fake.requests.clear()
+    quiet = runner.invoke(cli.app, ["sync", "--if-updated"])  # nothing new at Pluggy
+    assert quiet.exit_code == 0, quiet.output
+    assert quiet.output == ""
+    paths = {r.url.path for r in fake.requests}
+    assert paths <= {"/auth", f"/items/{ITEM_ID}"}  # one light look per item
+
+    later = datetime.now(UTC) + timedelta(minutes=1)
+    fake.item["lastUpdatedAt"] = later.isoformat().replace("+00:00", "Z")
+    again = runner.invoke(cli.app, ["sync", "--if-updated"])  # Meu Pluggy refreshed
+    assert "1 conexão(ões) atualizada(s)" in again.output
+    assert "0 novas" in again.output
+
+    # A day without any refresh still gets a full sync.
+    fake.item["lastUpdatedAt"] = "2026-11-14T06:00:00.000Z"
+    store = cli.open_store()
+    try:
+        (profile,) = config.load_profiles()
+        client = cli.make_client(config.load_credentials(profile.id))
+        with client:
+            assert changed_items(store, client, profile) == []
+            tomorrow = datetime.now(UTC) + timedelta(hours=25)
+            assert changed_items(store, client, profile, tomorrow) == [ITEM_ID]
+    finally:
+        store.conn.close()

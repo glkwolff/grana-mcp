@@ -31,6 +31,11 @@ PRICES_OFF = (
     "Só entram preços de hoje: do Menor Preço, buscados pelo celular de vocês (botão "
     "'buscar preços de hoje' na Cozinha, ou request_prices no chat), e os anotados no chat."
 )
+RECEIPT_PHOTO = (
+    "Parece uma nota fiscal, mas o celular não conseguiu ler o QR Code. Tire outra foto "
+    "mais de perto, com o QR Code ocupando boa parte da foto e com luz, ou cole aqui o link "
+    "da nota (abra o QR com a câmera do celular e copie o link). Não anotei nada como comida."
+)
 PHONE_MAX_TERMS = 40
 PHONE_MAX_ITEMS = 80
 MARKETS_FRESH_DAYS = 30
@@ -295,6 +300,8 @@ class KitchenTools:
     def log_photo(self, est: dict[str, Any], meal: str) -> dict[str, Any]:
         """A photo estimate (structured, from the model) -> the diary of whoever sent it.
         Every field is untrusted model output: re-validated and sanitized here."""
+        if est.get("receipt") is True and not est.get("food"):
+            return {"ok": False, "summary": RECEIPT_PHOTO}
         if not est.get("food"):
             return {"ok": False, "summary": "Não parece comida; não anotei nada."}
         items: list[dict[str, Any]] = []

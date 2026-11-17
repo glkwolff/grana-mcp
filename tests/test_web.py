@@ -29,7 +29,8 @@ if "--json-schema" in args:  # a food photo: one stream-json user message on std
     assert "--no-session-persistence" in args and "--mcp-config" not in args
     content = json.loads(sys.stdin.readline())["message"]["content"]
     text = content[1]["text"]
-    est = {{"food": "gato" not in text, "description": "arroz, feijão e bife",
+    est = {{"food": "gato" not in text and "cupom" not in text, "receipt": "cupom" in text,
+           "description": "arroz, feijão e bife",
            "items": [{{"name": "arroz", "portion": "4 colheres", "kcal": 200, "protein_g": 4}},
                      {{"name": "bife", "portion": "120 g", "kcal": "muito", "protein_g": 30}}],
            "kcal": 650.4, "protein_g": 38, "confidence": "talvez"}}
@@ -479,6 +480,9 @@ def test_food_photo_is_a_cheap_separate_call(client: TestClient) -> None:
     assert tuple(row) == ("ana", "almoco", 650, 38, "foto")
     not_food = {"image": JPEG, "note": "meu gato"}
     assert client.post("/api/kitchen/photo", json=not_food, headers=h).json()["ok"] is False
+    # A receipt whose QR the phone couldn't read: ask for a closer photo, log nothing.
+    slip = client.post("/api/kitchen/photo", json={"image": JPEG, "note": "cupom"}, headers=h)
+    assert slip.json()["ok"] is False and "QR Code" in slip.json()["summary"]
     broken = {"image": JPEG, "note": "quebrado"}
     assert client.post("/api/kitchen/photo", json=broken, headers=h).status_code == 502
 
