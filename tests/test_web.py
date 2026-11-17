@@ -33,7 +33,10 @@ if "--json-schema" in args:  # a food photo: one stream-json user message on std
            "description": "arroz, feijão e bife",
            "items": [{{"name": "arroz", "portion": "4 colheres", "kcal": 200, "protein_g": 4}},
                      {{"name": "bife", "portion": "120 g", "kcal": "muito", "protein_g": 30}}],
-           "kcal": 650.4, "protein_g": 38, "confidence": "talvez"}}
+           "kcal": 650.4, "protein_g": 38, "confidence": "talvez",
+           "shared_with": ["bia", "Zé", "Ana"] if "dividir" in text else []}}
+    if "dividir" in text:
+        assert "Quem mandou: Ana. Pessoas da casa: Ana, Bia." in text
     if "quebrado" in text:
         out({{"type": "result", "subtype": "success", "is_error": False, "result": "x"}})
     else:
@@ -466,6 +469,7 @@ def test_food_photo_is_a_cheap_separate_call(client: TestClient) -> None:
 
     conn = store_db.connect(config.db_path())
     conn.execute("INSERT INTO people (id, display_name, created_at) VALUES ('ana', 'Ana', 'x')")
+    conn.execute("INSERT INTO people (id, display_name, created_at) VALUES ('bia', 'Bia', 'x')")
     conn.commit()
     conn.close()
     h = {"Authorization": f"Bearer {auth.add_user('ana')}"}
@@ -478,6 +482,17 @@ def test_food_photo_is_a_cheap_separate_call(client: TestClient) -> None:
     row = conn.execute("SELECT person_id, meal, kcal, protein_g, source FROM meal_log").fetchone()
     conn.close()
     assert tuple(row) == ("ana", "almoco", 650, 38, "foto")
+    # "um pra mim e um pra ela": the photo is split between the sender and the named people
+    # of the house (names the model made up, or the sender again, are ignored).
+    half = {"image": JPEG, "note": "dividir com a Bia", "meal": "lanche"}
+    out = client.post("/api/kitchen/photo", json=half, headers=h).json()
+    assert out["ok"] and "Ana e Bia" in out["summary"]
+    conn = store_db.connect(config.db_path())
+    rows = conn.execute(
+        "SELECT person_id, kcal, protein_g FROM meal_log WHERE meal = 'lanche' ORDER BY person_id"
+    ).fetchall()
+    conn.close()
+    assert [tuple(r) for r in rows] == [("ana", 325, 19), ("bia", 325, 19)]
     not_food = {"image": JPEG, "note": "meu gato"}
     assert client.post("/api/kitchen/photo", json=not_food, headers=h).json()["ok"] is False
     # A receipt whose QR the phone couldn't read: ask for a closer photo, log nothing.

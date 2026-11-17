@@ -321,9 +321,45 @@ class KitchenTools:
             else "media"
         )
         protein = _num(est.get("protein_g")) if est.get("protein_g") is not None else None
-        out = self.log_meal(meal, descr, _num(est.get("kcal")), protein, from_photo=True)
-        out.update(items=items, confidence=confidence, meal=meal)
-        return out
+        sender, household = self.who_is_home()
+        names = {n.lower(): n for n in household}
+        shared = [s for s in (est.get("shared_with") or []) if isinstance(s, str)][:6]
+        eaters = [sender] if sender else []
+        for s in shared:  # only real household names, each once
+            name = names.get(s.strip().lower())
+            if name and name not in eaters:
+                eaters.append(name)
+        if len(eaters) <= 1:
+            out = self.log_meal(meal, descr, _num(est.get("kcal")), protein, from_photo=True)
+            out.update(items=items, confidence=confidence, meal=meal)
+            return out
+        count = len(eaters)
+        each = _num(est.get("kcal")) / count
+        lines = [
+            self.log_meal(
+                meal, descr, each, protein / count if protein is not None else None,
+                person=who, from_photo=True,
+            )["summary"]
+            for who in eaters
+        ]  # fmt: skip
+        return {
+            "ok": True,
+            "summary": f"Dividi a foto entre {' e '.join(eaters)} ({round(each)} kcal cada).\n"
+            + "\n".join(lines),
+            "items": items,
+            "confidence": confidence,
+            "meal": meal,
+        }
+
+    def who_is_home(self) -> tuple[str | None, list[str]]:
+        """(the sender's display name or None, every household member's display name)."""
+        actor = self.actor()
+        with self._conn() as conn:
+            rows = conn.execute("SELECT id, display_name FROM people ORDER BY display_name")
+            people = [(str(r[0]), str(r[1])) for r in rows]
+        me = (actor or "").strip().lower()
+        sender = next((n for pid, n in people if me and me in (pid, n.lower())), None)
+        return sender, [name for _, name in people]
 
     def log_planned(self, meal: str, person: str | None = None) -> dict[str, Any]:
         """One tap on the page: 'I ate today's <meal> from the menu' (kcal x my portion)."""

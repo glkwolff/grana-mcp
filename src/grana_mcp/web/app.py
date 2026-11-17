@@ -344,11 +344,12 @@ def create_app(
         wait = state.limits.take(user)
         if wait:
             return _too_many(f"limite de pedidos atingido; tente em {wait // 60 + 1} min", wait)
-        est, event = await estimate_photo(state.runner, *image, note)
+        k = kitchen(user)
+        sender, household = await asyncio.to_thread(k.who_is_home)
+        est, event = await estimate_photo(state.runner, *image, note, sender, household)
         _record_usage(user, event, 0)
         if est is None:
             return bad(str(event.get("message")), 502)
-        k = kitchen(user)
         try:
             out = await asyncio.to_thread(k.log_photo, est, meal)
         except KitchenError as exc:

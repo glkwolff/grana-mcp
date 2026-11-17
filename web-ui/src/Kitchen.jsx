@@ -221,23 +221,31 @@ function Diary({ d, planned, busy, act, onAsk }) {
               <Ring kcal={i.kcal} target={i.target_kcal} onTarget={i.on_target} />
               {i.target_protein_g ? <span class="muted small">proteína {i.protein_g} de {i.target_protein_g} g</span> : null}
               {s && (s.logging_days > 0 || s.on_target_days > 0) && (
-                <span class="small">🔥 {s.logging_days} dia{s.logging_days === 1 ? "" : "s"} registrando{s.on_target_days ? ` · 🎯 ${s.on_target_days} na meta` : ""}</span>
+                <span class="small">🔥 {s.logging_days} dia{s.logging_days === 1 ? "" : "s"}{s.on_target_days ? ` · 🎯 ${s.on_target_days}` : ""}
+                  {s.logging_best > s.logging_days ? <span class="muted"> · recorde {s.logging_best}</span> : null}</span>
               )}
-              {s && s.logging_best > 1 && <span class="muted small">recorde: {s.logging_best} dias</span>}
             </div>
           );
         })}
       </div>
-      <ul class="eaten">
-        {d.intake.flatMap((i) => i.meals.map((m) => (
-          <li key={m.id}>
-            <span>{d.intake.length > 1 ? `${i.person} · ` : ""}{MEALS[m.meal] || "Extra"}: {m.what}{m.source === "foto" ? " 📷" : ""}</span>
-            <span class="num small">{m.kcal} kcal
-              <button class="x" aria-label={`Apagar ${m.what}`} disabled={!!busy} onClick={() => act("meal_delete", { id: m.id })}>×</button>
-            </span>
-          </li>
-        )))}
-      </ul>
+      {d.intake.map((i) => i.meals.length > 0 && (
+        <details class="eaten" key={i.person}>
+          <summary>
+            <strong>{i.person}</strong>
+            <span class="muted small">{i.meals.length} registro{i.meals.length === 1 ? "" : "s"} · {i.kcal} kcal</span>
+          </summary>
+          <ul>
+            {i.meals.map((m) => (
+              <li key={m.id}>
+                <span class="meal-tag">{MEALS[m.meal] || "Extra"}</span>
+                <span class="meal-what" title={m.what}>{m.what}{m.source === "foto" ? " 📷" : ""}</span>
+                <span class="num small">{m.kcal}</span>
+                <button class="x" aria-label={`Apagar ${m.what}`} disabled={!!busy} onClick={() => act("meal_delete", { id: m.id })}>×</button>
+              </li>
+            ))}
+          </ul>
+        </details>
+      ))}
       <div class="quick">
         {planned.map((m) => (
           <button key={m.meal} class="ghost" disabled={!!busy} onClick={() => act("meal", { meal: m.meal }, `meal-${m.meal}`)}>
