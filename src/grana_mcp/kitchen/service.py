@@ -16,8 +16,8 @@ from typing import Any
 import httpx
 
 from grana_mcp.analytics import queries
-from grana_mcp.analytics.periods import Period
-from grana_mcp.kitchen import diary, nutrition, places, prices, receipt, store
+from grana_mcp.analytics.periods import Period, PeriodError, parse_period, shift_month
+from grana_mcp.kitchen import diary, groceries, nutrition, places, prices, receipt, store
 from grana_mcp.money import format_brl
 from grana_mcp.privacy.redact import sanitize_text
 from grana_mcp.store import db
@@ -795,6 +795,10 @@ class KitchenTools:
                 return {"ok": True, "already": True, "summary": "Essa nota já tinha sido lida."}
             receipt.store_receipt(conn, r, key_hash, salt, self.actor())
             terms = self._price_terms(conn, None)
+            groceries.link_receipts(conn, self.today())
+            paid = groceries.receipt_payment(conn, key_hash)
+            view = self._receipt_view(conn, key_hash)
+            todo = groceries.uncategorized(conn, receipt=key_hash)
         covered = sorted({t for t in terms for line in r.lines if prices.relevant(line.descr, t)})
         merged: dict[tuple[str, str, int], float] = {}  # the same product on several lines
         for x in r.lines:
@@ -806,6 +810,11 @@ class KitchenTools:
         summary += f", total {total}." if total else "."
         if covered:
             summary += f" Da lista da semana: {', '.join(covered[:12])}."
+        if paid:
+            summary += f" Achei a compra no extrato: {paid['account']}, {paid['day'][8:10]}/"
+            summary += f"{paid['day'][5:7]}."
+        else:
+            summary += " Ainda não achei a compra no extrato (o Meu Pluggy atualiza 1x por dia)."
         return {
             "ok": True,
             "store": r.store,
@@ -813,12 +822,145 @@ class KitchenTools:
             "items": len(merged),
             "total": total,
             "list_items": covered,
-            "lines": [
-                {"what": d, "qty": round(q, 3), "unit": u, "price": format_brl(c)}
-                for (d, u, c), q in list(merged.items())[:60]
-            ],
+            "paid_with": paid,
+            **view,
             "summary": summary,
+            # for the web app only: which receipt, and its products with no category yet
+            "ref": key_hash,
+            "to_categorize": [{"descr": t["descr"], "needs_size": t["needs_size"]} for t in todo],
         }
+
+    def _receipt_view(self, conn: sqlite3.Connection, key_hash: str) -> dict[str, Any]:
+        return {
+            "groups": [
+                {k: g[k] for k in ("category", "total", "new")}
+                for g in groceries.receipt_groups(conn, key_hash)
+            ],
+            "lines": groceries.receipt_lines_priced(conn, key_hash)[:60],
+        }
+
+    def suggest_products(self, ref: str, suggestions: list[dict[str, Any]]) -> dict[str, Any]:
+        """Save the categories (and package contents) suggested for a receipt's new
+        products, still to be reviewed; returns the receipt's groups and lines again."""
+        cats: list[tuple[str, Any]] = []
+        sizes: list[tuple[str, Any, Any]] = []
+        for s in suggestions[: groceries.MAX_SET]:
+            descr = str(s.get("product") or "")
+            if not descr or s.get("category") not in groceries.CATEGORIES:
+                continue
+            cats.append((descr, s["category"]))
+            size, unit = s.get("size"), s.get("unit")
+            ok = isinstance(size, int | float) and 0 < size < 100_000
+            if ok and unit in groceries.SIZE_UNITS:
+                sizes.append((descr, size, unit))
+        with self._conn() as conn:
+            if cats:
+                groceries.set_categories(conn, cats, "suggested", "modelo")
+            if sizes:
+                groceries.set_sizes(conn, sizes, "suggested", "modelo")
+            return self._receipt_view(conn, ref)
+
+    def product_review(self) -> dict[str, Any]:
+        with self._conn() as conn:
+            out = groceries.review(conn)
+        n, sz, unc = out["suggested_count"], len(out["suggested_sizes"]), len(out["uncategorized"])
+        if not (n or sz or unc):
+            summary = "Nada para revisar: todo produto das notas tem categoria confirmada."
+        else:
+            summary = (
+                f"{n} produto(s) com categoria sugerida, {sz} com conteúdo da embalagem "
+                f"sugerido e {unc} sem categoria."
+            )
+        return {"ok": True, **out, "summary": summary}
+
+    def set_product_category(
+        self, products: list[dict[str, Any]], confirm: bool = True
+    ) -> dict[str, Any]:
+        pairs = [(str(p.get("product") or ""), p.get("category")) for p in products]
+        with self._conn() as conn:
+            out = groceries.set_categories(
+                conn, pairs, "confirmed" if confirm else "suggested", self.actor()
+            )
+        return {"ok": True, **out, "summary": _changed_summary(out, "categoria")}
+
+    def set_product_size(
+        self, products: list[dict[str, Any]], confirm: bool = True
+    ) -> dict[str, Any]:
+        triples = [(str(p.get("product") or ""), p.get("qty"), p.get("unit")) for p in products]
+        with self._conn() as conn:
+            out = groceries.set_sizes(
+                conn, triples, "confirmed" if confirm else "suggested", self.actor()
+            )
+        return {"ok": True, **out, "summary": _changed_summary(out, "conteúdo da embalagem")}
+
+    def confirm_products(self) -> dict[str, Any]:
+        with self._conn() as conn:
+            cats, sizes = groceries.confirm_suggested(conn, self.actor())
+        return {
+            "ok": True,
+            "summary": f"Confirmei {cats} categoria(s) e {sizes} conteúdo(s) de embalagem.",
+        }
+
+    def grocery_spending(self, period: Any = "this_month") -> dict[str, Any]:
+        """The receipts of a period by kind of product vs. the period before, the prices
+        that moved, and how much of the bank's 'Mercado' spending the receipts cover."""
+        today = self.today()
+        try:
+            p = parse_period(period, today)
+        except PeriodError as exc:
+            raise store.KitchenError(str(exc)) from None
+        days = (p.end - p.start).days + 1
+        if p.start.day == 1 and (p.end + timedelta(days=1)).day == 1:  # whole months
+            months = (p.end.year - p.start.year) * 12 + p.end.month - p.start.month + 1
+            y, m = shift_month(p.start.year, p.start.month, -months)
+            prev_start = date(y, m, 1)
+            prev_end = p.start - timedelta(days=1)
+        else:
+            prev_end = p.start - timedelta(days=1)
+            prev_start = prev_end - timedelta(days=days - 1)
+        with self._conn() as conn:
+            groceries.link_receipts(conn, today)
+            out = groceries.analysis(conn, p.start, p.end, prev_start, prev_end)
+            match = groceries.bank_match(conn, p.start, p.end, today)
+            bank = queries.spending_total(
+                conn, p, today, queries.Filters(categories=["Mercado"])
+            ).cents
+        with_cents = match.pop("_with_cents")
+        without_cents = match.pop("_without_cents")
+        out["bank_mercado"] = format_brl(bank)
+        out["bank"] = match
+        seen = with_cents + without_cents
+        out["coverage_pct"] = round(with_cents / seen * 100) if seen else None
+        out["period"] = p.as_dict()
+        out["previous_period"] = {"from": prev_start.isoformat(), "to": prev_end.isoformat()}
+        if not out["receipts"]:
+            out["summary"] = (
+                "Nenhuma nota lida nesse período. Mandem a foto do QR Code da nota no chat."
+            )
+        else:
+            top = ", ".join(f"{g['category']} {g['share_pct']:g}%" for g in out["groups"][:4])
+            out["summary"] = (
+                f"{out['receipts']} nota(s), {out['total']} em produtos: {top}."
+                + (
+                    f" {out['coverage_pct']}% do gasto em Mercado no extrato tem nota "
+                    f"({match['mercado_without_receipt']['count']} compra(s) sem nota, "
+                    f"{match['mercado_without_receipt']['total']})."
+                    if out["coverage_pct"] is not None
+                    else ""
+                )
+                + (
+                    f" {match['receipts_not_in_bank']['count']} nota(s) sem compra no extrato "
+                    "(dinheiro, vale-alimentação ou ainda não sincronizada)."
+                    if match["receipts_not_in_bank"]["count"]
+                    else ""
+                )
+                + (
+                    f" {out['pending_review']} produto(s) com categoria sugerida a revisar."
+                    if out["pending_review"]
+                    else ""
+                )
+            )
+        return {"ok": True, **out}
 
     def markets(self, discover: bool = False, refresh: bool = False) -> dict[str, Any]:
         cached = ""
@@ -1012,6 +1154,21 @@ class KitchenTools:
             "radius_km": rules["radius_km"] if rules else 5,
             "answered_today": any(d["day"] == today.isoformat() for d in log),
         }
+
+
+def _changed_summary(out: dict[str, Any], what: str) -> str:
+    parts = []
+    if out["changed"]:
+        parts.append(f"{what.capitalize()} salvo(a) para {len(out['changed'])} produto(s).")
+    if out["not_found"]:
+        parts.append("Não achei nas notas: " + ", ".join(out["not_found"]) + ".")
+    if out["too_broad"]:
+        parts.append(
+            "Nome genérico demais (bate com muitos produtos): " + ", ".join(out["too_broad"]) + "."
+        )
+    if not parts:
+        parts.append("Nada mudou (o que já estava confirmado continua).")
+    return " ".join(parts)
 
 
 def _num(value: Any) -> int:

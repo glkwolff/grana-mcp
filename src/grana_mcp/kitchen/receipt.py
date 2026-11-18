@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 import httpx
 
-from grana_mcp.kitchen import prices
+from grana_mcp.kitchen import groceries, prices
 from grana_mcp.kitchen.store import KitchenError
 from grana_mcp.privacy.redact import sanitize_text
 from grana_mcp.store.db import hash_doc, now_utc
@@ -202,16 +202,6 @@ def parse_page(page: str) -> Receipt:
     )
 
 
-def _size(line: Line) -> tuple[float | None, str | None]:
-    """Package size of a line: by-weight units are priced per kg/l; else from the text."""
-    if line.unit in ("KG", "KGS", "QUILO"):
-        return 1.0, "kg"
-    if line.unit in ("L", "LT", "LTS", "LITRO"):
-        return 1.0, "l"
-    size = prices.parse_size(line.descr)
-    return (size[0], size[1]) if size else (None, None)
-
-
 def search_word(descr: str) -> str:
     """Receipt items are filed under their first word (the product noun); offers() matches
     them to any search term with relevant()."""
@@ -243,14 +233,16 @@ def store_receipt(
         (code, r.store, r.address, now),
     )
     sold_at = r.issued.isoformat(timespec="seconds")
+    known = groceries.known_sizes(conn)
     n = 0
     for line in r.lines:
         word = search_word(line.descr)
         if not word:
             continue
-        size, unit = _size(line)
+        found = groceries.line_size(groceries.product_key(line.descr), line.descr, line.unit, known)
+        size, unit = found if found else (None, None)
         descr = line.descr
-        if unit == "kg" and size == 1.0 and not prices.parse_size(descr):
+        if line.unit.upper() in groceries.WEIGHT_UNITS and not prices.parse_size(descr):
             descr = f"{descr} KG"  # sold by weight: the unit price is per kg (see is_loose)
         conn.execute(
             "INSERT OR REPLACE INTO price_obs (search, market, descr, gtin, cents, size, unit, "
@@ -263,5 +255,6 @@ def store_receipt(
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (key_hash, code, r.issued.date().isoformat(), n, r.total_cents, r.store, now, by),
     )
+    groceries.store_lines(conn, key_hash, code, r.issued.date().isoformat(), r.lines)
     conn.commit()
     return code, n

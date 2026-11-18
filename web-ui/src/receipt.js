@@ -84,10 +84,22 @@ export async function postReceipt(qr) {
   return data;
 }
 
-/** The answer shown in the chat (markdown). */
+/** The answer shown in the chat (markdown): the receipt by kind of product, each item's
+ * price per unit/kg/l, and the categories suggested for products seen for the first time. */
 export function receiptText(r) {
   if (r.already) return r.summary;
-  const lines = (r.lines || []).slice(0, 15).map((l) => `- ${l.what}: ${l.price}${l.unit === "KG" ? "/kg" : l.qty > 1 ? ` (×${l.qty})` : ""}`).join("\n");
-  const more = r.items > 15 ? `\n- … e mais ${r.items - 15}` : "";
-  return `🧾 ${r.summary}\n\n${lines}${more}\n\nEsses preços já valem na lista de compras por 7 dias.`;
+  const groups = (r.groups || []).map((g) => `- **${g.category}**: ${g.total}`).join("\n");
+  const lines = (r.lines || []).slice(0, 20).map((l) => {
+    const qty = l.unit === "KG" ? ` (${l.qty} kg)` : l.qty > 1 ? ` (×${l.qty})` : "";
+    const per = l.per && l.unit !== "KG" ? ` → ${l.content ? `${l.content}, ` : ""}${l.per}` : "";
+    return `- ${l.what}: ${l.price}${l.unit === "KG" ? "/kg" : ""}${qty}${per}`;
+  }).join("\n");
+  const more = (r.lines || []).length > 20 ? `\n- … e mais ${r.lines.length - 20}` : "";
+  const fresh = (r.groups || []).filter((g) => g.new && g.new.length);
+  const review = fresh.length
+    ? "\n\n**Produtos novos, confere a categoria?**\n" +
+      fresh.map((g) => `- ${g.category}: ${g.new.join(", ")}`).join("\n") +
+      "\n\nSe algo estiver errado, me diga aqui (ex.: \"Coca é bebida\", \"a fralda tem 116 tiras\"); se estiver tudo certo, diga \"pode confirmar\"."
+    : "";
+  return `🧾 ${r.summary}\n\n${groups}\n\n${lines}${more}${review}\n\nEsses preços já valem na lista de compras por 7 dias.`;
 }

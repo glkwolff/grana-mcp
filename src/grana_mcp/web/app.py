@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import contextlib
 import json
 import logging
 import os
@@ -37,7 +38,13 @@ from grana_mcp.server import PRICES_ENV, GranaTools
 from grana_mcp.store import db
 from grana_mcp.sync import today_sp
 from grana_mcp.web import auth, history, usage
-from grana_mcp.web.claude_runner import RunnerConfig, estimate_photo, prepare, run_turn
+from grana_mcp.web.claude_runner import (
+    RunnerConfig,
+    categorize_products,
+    estimate_photo,
+    prepare,
+    run_turn,
+)
 from grana_mcp.web.limits import AuthGuard, ChatLimits
 
 log = logging.getLogger(__name__)
@@ -357,11 +364,14 @@ def create_app(
         return JSONResponse(out, headers=SECURITY_HEADERS)
 
     async def read_receipt(request: Request) -> Response:
-        """The QR code (or link) of a receipt -> its prices. No model call."""
+        """The QR code (or link) of a receipt -> its prices, grouped by kind of product.
+        Products seen before keep their category; only the names of new ones go to a cheap
+        one-shot model call, as suggestions the household reviews in the chat."""
         try:
             user = await _user(request, state)
         except Denied as d:
             return d.response
+        k = kitchen(user)
         try:
             if int(request.headers.get("content-length") or 0) > MAX_PRICE_BODY:
                 raise ValueError("corpo grande demais")
@@ -369,9 +379,17 @@ def create_app(
             if not isinstance(body, dict):
                 raise ValueError("corpo inválido")
             async with state.receipt_lock:  # one at a time to the tax office
-                data = await asyncio.to_thread(kitchen(user).read_receipt, body.get("qr"))
+                data = await asyncio.to_thread(k.read_receipt, body.get("qr"))
         except (KitchenError, ValueError) as exc:
             return JSONResponse({"error": str(exc)}, status_code=400, headers=SECURITY_HEADERS)
+        ref, todo = data.pop("ref", None), data.pop("to_categorize", None) or []
+        if ref and todo and not state.limits.take(user):
+            found, event = await categorize_products(state.runner, todo)
+            _record_usage(user, event, 0)
+            if found:
+                # if this fails the receipt is still saved; its products wait for a category
+                with contextlib.suppress(KitchenError, ValueError):
+                    data.update(await asyncio.to_thread(k.suggest_products, ref, found))
         return JSONResponse(data, headers=SECURITY_HEADERS)
 
     async def kitchen_view(request: Request) -> Response:

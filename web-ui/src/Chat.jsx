@@ -7,6 +7,11 @@ import { findQr, isReceiptQr, postReceipt, receiptLink, receiptText } from "./re
 import { lookupPrices, summary } from "./phonePrices.js";
 
 const TOOL_LABELS = {
+  grocery_spending: "analisando as notas do mercado",
+  product_review: "vendo os produtos a revisar",
+  set_product_category: "salvando a categoria",
+  set_product_size: "salvando o tamanho da embalagem",
+  confirm_products: "confirmando os produtos",
   kitchen_status: "olhando a cozinha",
   set_diet_profile: "salvando o perfil",
   set_kitchen_rules: "salvando as regras da cozinha",
@@ -222,7 +227,7 @@ export function Chat({ messages, setMessages, thread, setThread, pending, onDone
         else if (ev.type === "tool") {
           tools += 1;
           if (DEVICE[ev.name]) device.add(DEVICE[ev.name]);
-          if (["set_budget", "set_goal", "delete_goal", "post_notice", "delete_notice", "set_category_rule", "remember", "forget", "set_diet_profile", "set_kitchen_rules", "log_weight", "log_day", "set_meal_plan", "set_market", "set_brand", "set_unit_weight", "log_meal", "delete_meal", "note_price"].includes(ev.name)) wrote = true;
+          if (["set_budget", "set_goal", "delete_goal", "post_notice", "delete_notice", "set_category_rule", "remember", "forget", "set_diet_profile", "set_kitchen_rules", "log_weight", "log_day", "set_meal_plan", "set_market", "set_brand", "set_unit_weight", "log_meal", "delete_meal", "note_price", "set_product_category", "set_product_size", "confirm_products"].includes(ev.name)) wrote = true;
           patch((x) => ({ status: `${TOOL_LABELS[ev.name] || "consultando"}…`, text: x.text ? `${x.text}\n\n` : "" }));
         } else if (ev.type === "done") patch((x) => ({ text: ev.result || x.text, status: null, meta: usageLine(ev.usage, tools) }));
         else if (ev.type === "error") patch(() => ({ error: ev.message, status: null }));

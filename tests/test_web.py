@@ -13,6 +13,7 @@ from starlette.testclient import TestClient
 from typer.testing import CliRunner
 
 from grana_mcp import cli, config
+from grana_mcp.store import db
 from grana_mcp.web import app as app_module
 from grana_mcp.web import auth
 from grana_mcp.web import claude_runner as cr
@@ -28,6 +29,15 @@ def out(e): print(json.dumps(e), flush=True)
 if "--json-schema" in args:  # a food photo: one stream-json user message on stdin
     assert "--no-session-persistence" in args and "--mcp-config" not in args
     content = json.loads(sys.stdin.readline())["message"]["content"]
+    if content[0]["type"] == "text":  # receipt products to categorize
+        listing = content[0]["text"].split("<produtos>")[1].split("</produtos>")[0]
+        cats = {{"ARROZ": "mercearia", "TOMATE": "hortifruti", "CEBOLA": "mercearia"}}
+        items = [{{"i": p["i"], "category": cats.get(p["produto"].split()[0], "brinquedos"),
+                   "size": 0, "unit": "un"}} for p in json.loads(listing)]
+        items.append({{"i": 99, "category": "outros", "size": 0, "unit": "un"}})
+        out({{"type": "result", "subtype": "success", "is_error": False, "result": "",
+             "structured_output": {{"items": items}}, "usage": {{"input_tokens": 300}}}})
+        sys.exit(0)
     text = content[1]["text"]
     est = {{"food": "gato" not in text and "cupom" not in text, "receipt": "cupom" in text,
            "description": "arroz, feijão e bife",
@@ -521,10 +531,36 @@ def test_photo_command_is_minimal() -> None:
     assert "--mcp-config" not in cmd and cmd[cmd.index("--model") + 1] == "haiku"
 
 
+def test_receipt_route_categorizes_new_products(fake_claude: Path, tmp_path: Path) -> None:
+    from tests.test_kitchen import NFCE_PAGE, NFCE_QR
+
+    cfg = cr.RunnerConfig(claude_bin=str(fake_claude), workdir=tmp_path / "w")
+    client = TestClient(create_app(cfg, receipts=lambda url: NFCE_PAGE))
+    h = {"Authorization": f"Bearer {auth.add_user('ana')}"}
+    r = client.post("/api/kitchen/receipt", json={"qr": NFCE_QR}, headers=h)
+    assert r.status_code == 200, r.text
+    data = r.json()
+    assert "ref" not in data and "to_categorize" not in data  # internal only
+    groups = {g["category"]: g for g in data["groups"]}
+    assert groups["Mercearia (grãos, massas, óleo, temperos)"]["new"] == [
+        "ARROZ T1 TIO EXEMPLO 5KG",
+        "CEBOLA EM PO 50G",
+    ]
+    assert groups["Hortifrúti"]["total"] == "R$ 6,60"
+    conn = db.connect(config.db_path())
+    try:
+        rows = conn.execute("SELECT status, by FROM product_categories").fetchall()
+        assert {tuple(x) for x in rows} == {("suggested", "modelo")}
+        (calls,) = conn.execute("SELECT COUNT(*) FROM chat_usage").fetchone()
+        assert calls == 1
+    finally:
+        conn.close()
+
+
 def test_receipt_route_reads_qr_without_the_model(tmp_path: Path) -> None:
     from tests.test_kitchen import NFCE_PAGE, NFCE_QR
 
-    cfg = cr.RunnerConfig(claude_bin="/bin/false", workdir=tmp_path)  # no model call
+    cfg = cr.RunnerConfig(claude_bin="/bin/false", workdir=tmp_path)  # the categorizer fails
     client = TestClient(create_app(cfg, receipts=lambda url: NFCE_PAGE))
     h = {"Authorization": f"Bearer {auth.add_user('ana')}"}
     r = client.post("/api/kitchen/receipt", json={"qr": NFCE_QR}, headers=h)
