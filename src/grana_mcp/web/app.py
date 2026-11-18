@@ -179,6 +179,7 @@ def create_app(
         try:  # the day's calories on the home screen (only when the diet is set up)
             food = await asyncio.to_thread(kitchen(user).food_diary)
             data["food_today"] = {k: food[k] for k in ("intake", "streaks", "week_score")}
+            data["water_today"] = food["water"]
         except (KitchenError, sqlite3.Error):
             pass
         return JSONResponse(data, headers=SECURITY_HEADERS)
@@ -390,6 +391,40 @@ def create_app(
                 # if this fails the receipt is still saved; its products wait for a category
                 with contextlib.suppress(KitchenError, ValueError):
                     data.update(await asyncio.to_thread(k.suggest_products, ref, found))
+        return JSONResponse(data, headers=SECURITY_HEADERS)
+
+    async def water_view(request: Request) -> Response:
+        """GET: today's water for everyone. POST {ml} | {undo: true} | {settings: {...}}:
+        always for the person using the app. The goal itself is agreed in the chat."""
+        try:
+            user = await _user(request, state)
+        except Denied as d:
+            return d.response
+        k = kitchen(user)
+        try:
+            if request.method == "POST":
+                body = await request.json()
+                if not isinstance(body, dict):
+                    raise ValueError("corpo inválido")
+                if body.get("undo"):
+                    data = await asyncio.to_thread(k.undo_water)
+                elif isinstance(body.get("settings"), dict):
+                    cfg = body["settings"]
+                    data = await asyncio.to_thread(
+                        k.set_water,
+                        None,
+                        None,  # the goal only through the chat
+                        cfg.get("reminders") if isinstance(cfg.get("reminders"), bool) else None,
+                        cfg.get("start_hour"),
+                        cfg.get("end_hour"),
+                        cfg.get("every_min"),
+                    )
+                else:
+                    data = await asyncio.to_thread(k.log_water, body.get("ml"))
+            else:
+                data = await asyncio.to_thread(k.water_today)
+        except (KitchenError, ValueError, TypeError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400, headers=SECURITY_HEADERS)
         return JSONResponse(data, headers=SECURITY_HEADERS)
 
     async def kitchen_view(request: Request) -> Response:
@@ -616,6 +651,7 @@ def create_app(
         Route("/api/kitchen/prices/done", phone_prices, methods=["POST"]),
         Route("/api/kitchen/photo", food_photo, methods=["POST"]),
         Route("/api/kitchen/receipt", read_receipt, methods=["POST"]),
+        Route("/api/water", water_view, methods=["GET", "POST"]),
         Route("/api/kitchen/{action}", kitchen_view, methods=["POST"]),
         Route("/api/memory/delete", memory_view, methods=["POST"]),
         Route("/api/push/subscribe", push_change, methods=["POST"]),

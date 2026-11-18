@@ -47,6 +47,7 @@ class Alert:
     group: str = ""  # "buy": merged into one "N gastos novos" digest per run
     cents: int = 0
     label: str = ""
+    to: tuple[str, ...] = ()  # only these web users' phones (lowercase); empty = everyone
 
 
 @dataclass
@@ -389,6 +390,16 @@ def kitchen_alerts(conn: sqlite3.Connection, now: datetime) -> list[Alert]:
     return out
 
 
+def water_alerts(conn: sqlite3.Connection, now: datetime) -> list[Alert]:
+    """Water reminders, each to the phones of the person who is behind."""
+    from grana_mcp.kitchen import water
+
+    return [
+        Alert(r.key, r.title, r.body, url="/#agua", tag=f"water:{r.person_id}", to=r.to)
+        for r in water.due(conn, now)
+    ]
+
+
 def collect(
     conn: sqlite3.Connection,
     now: datetime,
@@ -405,6 +416,7 @@ def collect(
         *purchase_alerts(conn, today, s.big_purchase_cents, s.purchases),
         *recurring_alerts(conn, today),
         *kitchen_alerts(conn, now),
+        *water_alerts(conn, now),
     ]
     if s.weekly:
         alerts += weekly_alert(conn, now)
@@ -464,11 +476,14 @@ def run(
         covered = []
     if not due:
         return result
-    batch = due[:MAX_PER_RUN]
-    if len(due) > MAX_PER_RUN:
-        rest = len(due) - MAX_PER_RUN + 1
+    personal = [a for a in due if a.to]  # one per person at most: never folded into "+N"
+    shared = [a for a in due if not a.to]
+    batch = shared[:MAX_PER_RUN]
+    if len(shared) > MAX_PER_RUN:
+        rest = len(shared) - MAX_PER_RUN + 1
         more = Alert(f"_more:{now.isoformat()}", f"+{rest} avisos no grana", "Abra o painel.")
-        batch = [*due[: MAX_PER_RUN - 1], more]
+        batch = [*shared[: MAX_PER_RUN - 1], more]
+    batch += personal
     for alert in batch:
         ok, bad = deliver(alert)
         result.deliveries += ok

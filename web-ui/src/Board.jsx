@@ -3,6 +3,7 @@
 
 import { ago, brl, brlCents, cents, fmtDate, monthName } from "./fmt.js";
 import { FoodToday } from "./FoodRing.jsx";
+import { WaterToday } from "./Water.jsx";
 
 function Bar({ pct, tone }) {
   const w = Math.max(0, Math.min(pct, 100));
@@ -71,6 +72,8 @@ export function Board({ data, error, onAsk, onOpenCategory, onMore, onKitchen })
       </section>
 
       {data.food_today && data.food_today.intake.length > 0 && <FoodToday food={data.food_today} onOpen={onKitchen} />}
+
+      {data.water_today && data.water_today.length > 0 && <WaterToday water={data.water_today} onAsk={onAsk} />}
 
       {data.notices.length > 0 && (
         <div class="notices">

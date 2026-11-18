@@ -17,7 +17,16 @@ import httpx
 
 from grana_mcp.analytics import queries
 from grana_mcp.analytics.periods import Period, PeriodError, parse_period, shift_month
-from grana_mcp.kitchen import diary, groceries, nutrition, places, prices, receipt, store
+from grana_mcp.kitchen import (
+    diary,
+    groceries,
+    nutrition,
+    places,
+    prices,
+    receipt,
+    store,
+    water,
+)
 from grana_mcp.money import format_brl
 from grana_mcp.privacy.redact import sanitize_text
 from grana_mcp.store import db
@@ -196,6 +205,7 @@ class KitchenTools:
             favs = prices.shop_places(conn) or [
                 r["name"] for r in prices.nearby_markets(conn) if r["favorite"]
             ]
+            drink = water.status(conn, today)
         planned_days = sorted({m["day"] for m in meals})
         budget = rules["weekly_budget_cents"] if rules else None
         out: dict[str, Any] = {
@@ -232,6 +242,9 @@ class KitchenTools:
             todo.append("montar o cardápio desta semana")
         if not favs:
             todo.append("dizer em quais mercados compram (set_market): os preços comparam só eles")
+        for w in drink if people else []:
+            if not w["goal_ml"]:
+                todo.append(f"{w['person']}: combinar a meta de água (set_water_goal)")
         out["todo"] = todo
         names = (
             ", ".join(f"{p['person']} {p.get('kcal', '?')} kcal" for p in people) or "sem perfis"
@@ -417,6 +430,7 @@ class KitchenTools:
             prev = diary.week_score(conn, people, last, mon - timedelta(days=1),
                                     delivery(last, mon - timedelta(days=1)))  # fmt: skip
             streaks = diary.streaks(conn, people, today)
+            drink = water.status(conn, when, self.actor())
         intake = []
         for p in people:
             t = tot.get((p["person"], when.isoformat()))
@@ -446,6 +460,7 @@ class KitchenTools:
         return {
             "day": when.isoformat(),
             "intake": intake,
+            "water": drink,
             "streaks": streaks,
             "week_score": week,
             "last_week_points": prev["points"],
@@ -456,6 +471,82 @@ class KitchenTools:
                 + " kcal" for i in intake
             ) + f"; placar da semana {week['points']} pts (semana passada {prev['points']}).",
         }  # fmt: skip
+
+    # --- water ---
+
+    def water_today(self) -> dict[str, Any]:
+        with self._conn() as conn:
+            people = water.status(conn, self.today(), self.actor())
+        summary = "; ".join(
+            f"{p['person']} {water.liters(p['ml'])}"
+            + (f" de {water.liters(p['goal_ml'])}" if p["goal_ml"] else " (meta a combinar)")
+            + (" ✓" if p["done"] else "")
+            for p in people
+        )
+        return {"ok": True, "day": self.today().isoformat(), "people": people, "summary": summary}
+
+    def _who(self, person: str | None) -> str:
+        who = person or self.actor()
+        if not who:
+            raise store.KitchenError("diga de quem é (person)")
+        return who
+
+    def log_water(
+        self, ml: Any, person: str | None = None, day: str | None = None
+    ) -> dict[str, Any]:
+        who = self._who(person)
+        when = self._day(day, back=2)
+        with self._conn() as conn:
+            water.add(conn, who, ml, when, self.actor())
+            pid = store.person_id(conn, who)
+            mine = next(
+                p for p in water.status(conn, when, pid) if p["me"]
+            )  # the person just logged
+        out = self.water_today() if when == self.today() else {"ok": True, "people": []}
+        line = f"{mine['person']}: {water.liters(mine['ml'])}"
+        line += f" de {water.liters(mine['goal_ml'])}" if mine["goal_ml"] else " (meta a combinar)"
+        out["summary"] = f"Anotado {water.liters(round(float(ml)))}. {line}" + (
+            " — meta batida! 💧" if mine["done"] else "."
+        )
+        return out
+
+    def undo_water(self, person: str | None = None) -> dict[str, Any]:
+        who = self._who(person)
+        with self._conn() as conn:
+            ml = water.undo_last(conn, who, self.today())
+        out = self.water_today()
+        out["summary"] = (
+            f"Tirei o último registro ({water.liters(ml)})."
+            if ml
+            else ("Não havia água registrada hoje.")
+        )
+        return out
+
+    def set_water(
+        self,
+        person: str | None = None,
+        goal_ml: Any = None,
+        reminders: bool | None = None,
+        start_hour: Any = None,
+        end_hour: Any = None,
+        every_min: Any = None,
+    ) -> dict[str, Any]:
+        who = self._who(person)
+        with self._conn() as conn:
+            pid = water.configure(
+                conn, who, self.actor(), goal_ml, reminders, start_hour, end_hour, every_min
+            )
+            mine = next(p for p in water.status(conn, self.today(), pid) if p["me"])
+        out = self.water_today()
+        rem = (
+            f"lembretes a cada {mine['every_min']} min, das {mine['start_hour']}h às "
+            f"{mine['end_hour']}h (só quando estiver atrás e sem beber água há esse tempo)"
+            if mine["reminders"]
+            else "sem lembretes"
+        )
+        meta = water.liters(mine["goal_ml"]) if mine["goal_ml"] else "a combinar"
+        out["summary"] = f"{mine['person']}: meta de água {meta}, {rem}."
+        return out
 
     # --- writes ---
 

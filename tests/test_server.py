@@ -25,7 +25,7 @@ KITCHEN_TOOLS = {
     "set_meal_plan", "meal_plan", "shopping_list", "find_prices", "markets", "set_market",
     "note_price", "set_brand", "set_unit_weight", "log_meal", "delete_meal", "food_diary",
     "grocery_spending", "product_review", "set_product_category", "set_product_size",
-    "confirm_products",
+    "confirm_products", "water_today", "log_water", "undo_water", "set_water_goal",
 }  # fmt: skip
 _ids = itertools.count(1)
 
@@ -406,7 +406,8 @@ def test_mcp_registration(conn: sqlite3.Connection) -> None:
         writers = {"set_category_rule", "set_budget", "set_goal", "delete_goal",
                    "post_notice", "delete_notice", "remember", "forget",
                    *(KITCHEN_TOOLS - {"kitchen_status", "meal_plan", "food_diary",
-                                      "grocery_spending", "product_review"})}  # fmt: skip
+                                      "grocery_spending", "product_review",
+                                      "water_today"})}  # fmt: skip
         assert t.annotations.read_only_hint is (t.name not in writers)
     for name in ("spending_summary", "top_merchants", "find_transactions", "excluded_items",
                  "overview", "explain_category", "household_context"):  # fmt: skip

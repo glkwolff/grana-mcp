@@ -321,3 +321,52 @@ def register(server: MCPServer, k: KitchenTools) -> None:
     )
     def confirm_products() -> dict[str, Any]:
         return _safe(k.confirm_products)
+
+    @server.tool(
+        annotations=_RO,
+        description="Água de hoje de cada pessoa da casa: quanto bebeu, a meta combinada "
+        "(goal_ml null = ainda não combinada: proponha no chat), suggested_ml (35 ml/kg do "
+        "último peso, só ponto de partida), último registro e os lembretes de cada um.",
+    )
+    def water_today() -> dict[str, Any]:
+        return _safe(k.water_today)
+
+    @server.tool(
+        annotations=_RW,
+        description="Anota água que alguém bebeu, em ml (copo ~250, garrafinha 500, garrafa "
+        "1500; converta o que a pessoa disser). person: padrão é quem está conversando; day "
+        "AAAA-MM-DD (padrão hoje, até 2 dias atrás). Uma chamada por pessoa.",
+    )
+    def log_water(ml: float, person: str | None = None, day: str | None = None) -> dict[str, Any]:
+        return _safe(lambda: k.log_water(ml, person, day))
+
+    @server.tool(
+        annotations=_RW,
+        description="Desfaz o último registro de água de hoje da pessoa (para corrigir).",
+    )
+    def undo_water(person: str | None = None) -> dict[str, Any]:
+        return _safe(lambda: k.undo_water(person))
+
+    @server.tool(
+        annotations=_RW,
+        description="Meta e lembretes de água de uma pessoa (padrão: quem está conversando). "
+        "A meta é COMBINADA no chat: antes de salvar goal_ml (500-8000 ml/dia), proponha um "
+        "valor e explique (water_today.suggested_ml = 35 ml/kg do último peso, como ponto de "
+        "partida; ajuste por atividade física, calor, gestação/amamentação, e com orientação "
+        "médica quando houver restrição de líquidos) e só salve quando a pessoa concordar. "
+        "Sem meta não há lembrete. reminders true/false liga/desliga as notificações no "
+        "celular DELA; start_hour/end_hour (0-24) e every_min (30-480): o lembrete só sai "
+        "nesse horário, quando ela está abaixo da meta e sem registrar água há every_min "
+        "minutos. Mande só o que mudar." + NOTE,
+    )
+    def set_water_goal(
+        person: str | None = None,
+        goal_ml: int | None = None,
+        reminders: bool | None = None,
+        start_hour: int | None = None,
+        end_hour: int | None = None,
+        every_min: int | None = None,
+    ) -> dict[str, Any]:
+        return _safe(
+            lambda: k.set_water(person, goal_ml, reminders, start_hour, end_hour, every_min)
+        )

@@ -11,6 +11,7 @@
   --ok: #2f8f5b;
   --near: #c58a12;
   --over: #c2412d;
+  --water: #2477c9;
   --goal: #3f6fb5;
   --me: #1e6b47;
   --me-ink: #f4fbf6;
@@ -38,6 +39,7 @@
     --ok: #4cc48a;
     --near: #e6b24a;
     --over: #ff7a66;
+    --water: #6cb4f5;
     --goal: #7aa7f0;
     --me: #2a5a42;
     --me-ink: #eaf7ef;
@@ -332,3 +334,10 @@ code { font: .9em ui-monospace, SFMono-Regular, Menlo, monospace; background: va
 .cam-btn { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
 .food-people { display: flex; flex-wrap: wrap; gap: 16px; }
 .food-person { display: flex; align-items: center; gap: 10px; }
+
+.water-me { margin-top: 4px; }
+.water-me .big { font-size: 28px; font-weight: 800; }
+.water-bar > span { background: var(--water); width: 100%; transform-origin: left; transition: transform .4s ease; }
+.water-settings { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.water-settings .row { justify-content: flex-start; align-items: center; flex-wrap: wrap; gap: 6px; }
+.water-settings select, .water-settings input[type="number"] { font: inherit; padding: 4px 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); }

@@ -54,6 +54,8 @@ def make_deliver(
         ok = bad = 0
         message = {"title": alert.title, "body": alert.body, "url": alert.url, "tag": alert.tag}
         for sub in subscriptions(conn, user):
+            if alert.to and str(sub["user"]).lower() not in alert.to:
+                continue  # a personal reminder: only that person's phones
             s = push.Subscription(sub["endpoint"], sub["p256dh"], sub["auth"])
             try:
                 status = push.send(
