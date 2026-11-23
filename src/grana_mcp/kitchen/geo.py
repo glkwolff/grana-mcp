@@ -1,5 +1,5 @@
-"""Geohash encoding (the price source takes a geohash). Precision 6 ~ 1.2 x 0.6 km:
-the household location is kept coarse on purpose."""
+"""Geohash encoding (the price source takes a geohash). Precision 12 ~ 3 x 2 cm, matching
+what the official Menor Preço site sends from the browser's coordinates."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import math
 _BASE32 = "0123456789bcdefghjkmnpqrstuvwxyz"
 
 
-def geohash(lat: float, lon: float, precision: int = 6) -> str:
+def geohash(lat: float, lon: float, precision: int = 12) -> str:
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         raise ValueError("coordenadas inválidas")
     lat_r, lon_r = [-90.0, 90.0], [-180.0, 180.0]

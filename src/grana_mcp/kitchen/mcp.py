@@ -160,6 +160,36 @@ def register(server: MCPServer, k: KitchenTools) -> None:
         return _safe(lambda: k.find_prices(term))
 
     @server.tool(
+        annotations=_RW,
+        description="Anota um item avulso para buscar preço pelo celular, mesmo sem estar no "
+        "cardápio (ex.: 'fralda pampers'). Antes de chamar, pergunte o detalhe que faltar: "
+        "'carne' é bovina, suína ou frango, e qual corte? A resposta mostra o termo exato que "
+        "será enviado ao Menor Preço, para conferir. Use brand/gtin/category se a pessoa "
+        "souber; depois chame request_prices para a busca acontecer." + NOTE,
+    )
+    def add_price_item(
+        item: str,
+        brand: str | None = None,
+        gtin: str | None = None,
+        category: int | None = None,
+    ) -> dict[str, Any]:
+        return _safe(lambda: k.add_price_item(item, brand, gtin, category))
+
+    @server.tool(
+        annotations=_RW,
+        description="Tira um item avulso da fila de buscas de preço." + NOTE,
+    )
+    def remove_price_item(item: str) -> dict[str, Any]:
+        return _safe(lambda: k.remove_price_item(item))
+
+    @server.tool(
+        annotations=_RO,
+        description="Itens avulsos anotados para busca de preço (fora do cardápio).",
+    )
+    def price_items() -> dict[str, Any]:
+        return _safe(k.price_items)
+
+    @server.tool(
         annotations=_NET,
         description="Lojas de comida perto de casa já conhecidas (supermercado, atacado, "
         "hortifrúti, açougue, padaria, feira), favoritos primeiro. discover=true busca no "

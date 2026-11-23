@@ -4,6 +4,10 @@
 // the household's own browser asks, at a human pace (one request every few seconds, only
 // the week's items without a price today, category cached by the server), and stops at
 // the first scrambled answer. Results go to the server as today's prices.
+// The query mirrors the official site: last week's sales (data=2), one page of 50, and a
+// category filter only when the source itself says there is exactly one category. Items
+// asked for in chat can bring a barcode (searched instead of the name) or a category; when
+// a chat item still matches several categories, no product search is spent on it.
 
 import { api, getJSON } from "./api.js";
 
@@ -18,7 +22,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let last = 0;
 let running = null;
 
-const TIMEOUT_MS = 15000; // the service silently drops some connections; don't hang on them
+const TIMEOUT_MS = 6000; // the service silently drops some connections; don't hang on them
 
 async function mp(path, params) {
   for (let attempt = 0; ; attempt++) {
@@ -37,10 +41,12 @@ async function mp(path, params) {
   }
 }
 
+// The official site only selects a category when there is exactly one. With none it
+// searches without a filter, and with several it asks the person: guessing the most
+// popular one hid offers of the same product filed under a different category.
 const dominant = (cats) => {
   const ok = (cats || []).filter((c) => c && c.id != null);
-  if (!ok.length) return null;
-  return Number(ok.reduce((a, b) => ((+b.qtd || 0) > (+a.qtd || 0) ? b : a)).id);
+  return ok.length === 1 ? Number(ok[0].id) : null;
 };
 
 const poisoned = (items) => {
@@ -67,7 +73,7 @@ async function report(r) {
     await api("/api/kitchen/prices/done", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ total: r.total, ok: r.ok, offers: r.offers, failed: r.failed.length, stopped: r.stopped || null }),
+      body: JSON.stringify({ total: r.total, ok: r.ok, offers: r.offers, failed: r.failed.length, stopped: r.stopped || null, ambiguous: r.ambiguous || [] }),
     });
   } catch { /* best effort */ }
   return r;
@@ -76,43 +82,66 @@ async function report(r) {
 async function run(onProgress) {
   const jobs = await getJSON("/api/kitchen/prices/jobs");
   const total = jobs.terms.length;
-  if (!total) return { done: 0, ok: 0, total, offers: 0, failed: [], menu: jobs.menu };
+  if (!total) return { done: 0, ok: 0, total, offers: 0, failed: [], ambiguous: [], menu: jobs.menu };
   let done = 0, ok = 0, offers = 0, fails = 0;
-  const failed = [];
+  const failed = [], ambiguous = [];
   onProgress?.({ done, total });
-  for (const { term, query, category } of jobs.terms) {
+  for (const job of jobs.terms) {
+    const { term, query, category, gtin, extra, label } = job;
     try {
-      let cat = category;
+      let cat = category, skipped = false;
       // query: the term plus the house's brand ("arroz tio joao"); the site searches both
       const where = { local: jobs.geohash, termo: query || term, raio: jobs.radius_km };
-      if (cat == null) cat = dominant((await mp("categorias", where)).categorias);
-      const params = { ...where, data: -1, offset: 0, ordem: 0 };
-      if (cat) params.categoria = cat;
-      const items = ((await mp("produtos", params)).produtos || []).slice(0, 80);
-      if (poisoned(items)) return { done, ok, total, offers, failed, stopped: STOPPED };
-      const res = await api("/api/kitchen/prices/item", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ term, category: cat, items }),
-      });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(body.error || `erro ${res.status}`);
-      offers += body.offers || 0;
-      ok += 1;
-      fails = 0;
+      const params = { ...where, data: 2, offset: 0, ordem: 0 };
+      if (gtin) {
+        // A barcode is exact: no category round trip, and no guessing from a phrase.
+        delete params.termo;
+        params.gtin = gtin;
+      } else {
+        if (cat == null) {
+          const categories = (await mp("categorias", where)).categorias || [];
+          if (extra && categories.length > 1) {
+            // A chat item ('carne') needs a choice before spending a product search.
+            const names = categories.slice(0, 4).map((c) => c.desc || c.nome || c.id).join(", ");
+            ambiguous.push(`${label || term}: ${names}`);
+            skipped = true;
+          } else {
+            // 0 is our cacheable "no single category applies": skip this request next time.
+            cat = dominant(categories) ?? 0;
+          }
+        }
+        if (cat > 0) params.categoria = cat;
+      }
+      if (!skipped) {
+        const items = (await mp("produtos", params)).produtos || [];
+        if (poisoned(items)) return { done, ok, total, offers, failed, ambiguous, stopped: STOPPED };
+        const res = await api("/api/kitchen/prices/item", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ term, category: cat, items }),
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(body.error || `erro ${res.status}`);
+        offers += body.offers || 0;
+        ok += 1;
+        fails = 0;
+      }
     } catch (e) {
       failed.push(term);
-      if (++fails >= MAX_FAILS) return { done, ok, total, offers, failed, stopped: `Parei: ${e.message || "sem resposta do Menor Preço"}.` };
+      if (++fails >= MAX_FAILS) return { done, ok, total, offers, failed, ambiguous, stopped: `Parei: ${e.message || "sem resposta do Menor Preço"}.` };
     }
     done += 1;
     onProgress?.({ done, total, term });
   }
-  return { done, ok, total, offers, failed };
+  return { done, ok, total, offers, failed, ambiguous };
 }
 
 /** One line for the chat or the page. */
 export function summary(r) {
   if (!r.total) return r.menu === false ? "Não há cardápio desta semana nem da próxima para buscar preços." : "Já tenho os preços de hoje de todos os itens da semana.";
   const base = `Busquei ${r.ok} de ${r.total} itens no Menor Preço (${r.offers} preços).`;
-  return [base, r.failed.length ? `Sem resposta: ${r.failed.join(", ")}.` : "", r.stopped || ""].filter(Boolean).join(" ");
+  const open = r.ambiguous?.length
+    ? `Escolha a categoria antes de buscar: ${r.ambiguous.join("; ")}.`
+    : "";
+  return [base, open, r.failed.length ? `Sem resposta: ${r.failed.join(", ")}.` : "", r.stopped || ""].filter(Boolean).join(" ");
 }

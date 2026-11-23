@@ -5,8 +5,8 @@ Paraná state treasury. Its JSON service is NOT documented; it may change, so it
 is isolated here, cached for 24 h per search term, rate-limited and never on the
 critical path (no prices -> the list still works, just without "where").
 
-What is sent to the source: the search term and the household's coarse location
-(geohash with ~1 km precision) and radius. Nothing else.
+What is sent to the source: the search term and the household's location (geohash,
+at the same precision the official site uses) and radius. Nothing else.
 """
 
 from __future__ import annotations
@@ -49,7 +49,9 @@ RECEIPT_PREFIX = "nfce:"  # stores from the household's own receipts (kitchen/re
 BY_WEIGHT = ("por kg", "por l")  # suffix of a noted price that is per kg/l, any amount
 CONNECT_TIMEOUT_S = 3.0
 CONNECT_TRIES = 4
-PAGES = 2  # 40 results per page
+PAGES = 2  # the official site asks for one page of 50; keep a second one for short pages
+PAGE_SIZE = 50
+DATA_WEEK = 2  # the source's "última semana"; -1 means "últimos 2 meses" (mostly discarded)
 MIN_INTERVAL_S = 1.0
 PAIR_MIN_SAVING = 15_00  # a second market must save at least R$ 15 ...
 PAIR_MIN_SHARE = 0.05  # ... and 5% of the basket
@@ -204,6 +206,26 @@ def fold(text: str) -> str:
     return " ".join(re.sub(r"[^a-z0-9]+", " ", ascii_).split())
 
 
+# Unlike store.search_key (made for abbreviated receipt lines), a term asked for in chat
+# keeps the detail the person gave: 'carne bovina costela' must not become 'carne bovina'.
+_TERM_STOP = {
+    "pra", "para", "pro", "pros", "pela", "pelo", "semana", "essa", "este", "esses",
+    "uns", "umas", "um", "uma", "algo", "qualquer", "tipo", "pacote", "pct",
+}  # fmt: skip
+MAX_TERM_WORDS = 4
+
+
+def search_term(text: str) -> str:
+    """Normalize a chat item into the ``termo`` the price source expects.
+
+    Accents and punctuation off, filler and numbers dropped, up to four words. Filler
+    words go away so 'carne pra semana' becomes just 'carne' -- an ambiguous term, which
+    the lookup reports back instead of turning into a blind search.
+    """
+    words = [w for w in fold(text).split() if w.isalpha() and w not in _TERM_STOP]
+    return " ".join(words[:MAX_TERM_WORDS])[:40]
+
+
 def place_key(text: str) -> str:
     """Words that identify a store: 'Festval da Kennedy' -> 'festval kennedy'."""
     return " ".join([w for w in fold(text).split() if w not in _PLACE_STOP][:5])
@@ -277,28 +299,33 @@ class MenorPreco:
         return data if isinstance(data, dict) else {}
 
     def category(self, term: str, geohash: str, radius_km: int) -> int | None:
-        """The category with most products for the term ('leite' -> 'Leite e derivados'),
-        so cheap unrelated items (chocolate, snacks) don't crowd the results."""
+        """Use the category only when the source reports exactly one. With none the search
+        goes unfiltered; with several the site asks the person, and picking the busiest one
+        here hid offers of the same product filed under a different category."""
         try:
             cats = self._get("categorias", {"local": geohash, "termo": term, "raio": radius_km})
         except (httpx.HTTPError, ValueError):
             return None
         options = [c for c in cats.get("categorias") or [] if isinstance(c, dict) and "id" in c]
-        if not options:
-            return None
-        return int(max(options, key=lambda c: int(c.get("qtd") or 0))["id"])
+        return int(options[0]["id"]) if len(options) == 1 else None
 
     def __call__(self, term: str, geohash: str, radius_km: int) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         category = self.category(term, geohash, radius_km)
         for page in range(PAGES):
             params: dict[str, Any] = {"local": geohash, "termo": term, "raio": radius_km}
-            params.update(data=-1, offset=page * 40, ordem=0)
+            params.update(data=DATA_WEEK, offset=page * PAGE_SIZE, ordem=0)
             if category is not None:
                 params["categoria"] = category
-            items = self._get("produtos", params).get("produtos") or []
+            answer = self._get("produtos", params)
+            items = answer.get("produtos") or []
+            total = answer.get("total")
             out.extend(i for i in items if isinstance(i, dict))
-            if len(items) < 40:
+            try:
+                enough = total is not None and len(out) >= int(total)
+            except (TypeError, ValueError):
+                enough = False
+            if len(items) < PAGE_SIZE or enough:
                 break
         return out
 
@@ -389,7 +416,7 @@ def refresh(
     if not geohash or fetch is None:
         return result
     start = time.monotonic()
-    now = datetime.now(UTC)
+    now = datetime.fromisoformat(now_utc())  # same clock as the timestamps stored above
     for term in dict.fromkeys(terms):
         if not stale(conn, term, now):
             result.cached += 1
@@ -530,6 +557,8 @@ def poisoned(items: list[dict[str, Any]]) -> bool:
 
 
 def category_of(conn: sqlite3.Connection, term: str) -> int | None:
+    """Cached category id, or 0 when we already learned there is no single one (never sent
+    to the source). None means it still has to be looked up."""
     row = conn.execute("SELECT category FROM price_category WHERE search = ?", (term,)).fetchone()
     return int(row[0]) if row else None
 

@@ -174,7 +174,7 @@ def test_profiles_rules_and_logs(conn: sqlite3.Connection) -> None:
 
 # --- menu and shopping ---
 
-MEALS = [
+MEALS: list[dict[str, Any]] = [
     {
         "day": 0, "meal": "almoco", "title": "Arroz, feijão e ovo", "kcal": 650, "protein_g": 30,
         "ingredients": [
@@ -311,7 +311,9 @@ def test_markets_from_osm_and_noted_prices(conn: sqlite3.Connection) -> None:
     from grana_mcp.kitchen import geo
 
     lat, lon = geo.decode("6gkzqf")
-    assert geo.geohash(lat, lon) == "6gkzqf" and round(geo.distance_km((0, 0), (0, 1))) == 111
+    assert geo.geohash(lat, lon, 6) == "6gkzqf"
+    assert geo.geohash(lat, lon).startswith("6gkzqf") and len(geo.geohash(lat, lon)) == 12
+    assert round(geo.distance_km((0, 0), (0, 1))) == 111
     k = kt()
     with pytest.raises(store.KitchenError, match="localização"):
         k.markets(discover=True)
@@ -459,11 +461,59 @@ def test_menor_preco_retries_dropped_connections(monkeypatch: pytest.MonkeyPatch
     calls.clear()
 
     def always(request: httpx.Request) -> httpx.Response:
-        calls.append(1)
+        calls.append("x")
         raise httpx.ConnectTimeout("dropped", request=request)
 
     mp = prices.MenorPreco(httpx.Client(transport=httpx.MockTransport(always)))
     assert mp.category("leite", "6gkzmg", 2) is None and len(calls) == prices.CONNECT_TRIES
+
+
+def test_menor_preco_category_only_when_unique(monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx
+
+    monkeypatch.setattr(prices, "MIN_INTERVAL_S", 0)
+    answer: dict[str, Any] = {"categorias": []}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=answer)
+
+    mp = prices.MenorPreco(httpx.Client(transport=httpx.MockTransport(handler)))
+    assert mp.category("leite", "6gkzmg", 2) is None  # no filter at all
+    answer = {"categorias": [{"id": 2, "qtd": 1}, {"id": 3, "qtd": 99}]}
+    assert mp.category("leite", "6gkzmg", 2) is None  # don't guess the busiest one
+    answer = {"categorias": [{"id": 2, "qtd": 1}]}
+    assert mp.category("leite", "6gkzmg", 2) == 2  # the site picks it automatically
+
+
+def test_menor_preco_search_uses_week_and_50_item_pages(monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx
+
+    monkeypatch.setattr(prices, "MIN_INTERVAL_S", 0)
+    calls: list[dict[str, str]] = []
+    products = [store_item(f"ARROZ {i}", 100, "A") for i in range(55)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        params = dict(request.url.params)
+        calls.append(params)
+        if request.url.path.endswith("/categorias"):
+            return httpx.Response(200, json={"categorias": []})
+        offset = int(params["offset"])
+        return httpx.Response(
+            200,
+            json={"total": len(products), "produtos": products[offset : offset + prices.PAGE_SIZE]},
+        )
+
+    mp = prices.MenorPreco(httpx.Client(transport=httpx.MockTransport(handler)))
+    assert len(mp("arroz", "6gkzmg", 2)) == 55  # two pages, then total is reached
+    searches = [c for c in calls if "data" in c]
+    assert [s["offset"] for s in searches] == ["0", "50"]
+    assert all(s["data"] == "2" and s["ordem"] == "0" for s in searches)
+    assert all("categoria" not in s for s in searches)
+
+    calls.clear()
+    products = [store_item("ARROZ 1KG", 100, "A")]
+    assert len(mp("arroz", "6gkzmg", 2)) == 1
+    assert len([c for c in calls if "data" in c]) == 1  # short page: don't ask again
 
 
 def test_prices_off(conn: sqlite3.Connection) -> None:
@@ -498,6 +548,12 @@ def test_prices_looked_up_by_the_phone(conn: sqlite3.Connection, tmp_path: Any) 
     after = k.price_jobs()
     assert after["terms"] == []  # all looked up today: the phone has nothing to do
     assert prices.category_of(conn, "arroz") == 7  # next time: one request less
+    # "no single category" is cached too, so the phone doesn't ask /categorias again
+    assert k.store_phone_prices("banana", 0, CATALOG["banana"])["ok"]
+    assert prices.category_of(conn, "banana") == 0
+    next_day = KitchenTools(config.db_path(), lambda: date(2026, 11, 19))
+    again = next(j for j in next_day.price_jobs()["terms"] if j["term"] == "banana")
+    assert again["category"] == 0
     out = k.shopping_list(refresh=False)
     assert out["estimated_total"] and "hoje" in out["prices"]
 
@@ -533,6 +589,50 @@ def test_prices_looked_up_by_the_phone(conn: sqlite3.Connection, tmp_path: Any) 
     assert client.post("/api/kitchen/prices/item", json=bad, headers=h).status_code == 400
     csp = client.get("/api/kitchen", headers=h).headers["content-security-policy"]
     assert "connect-src 'self' https://menorpreco.notaparana.pr.gov.br;" in csp
+
+
+def test_extra_price_items_from_chat(conn: sqlite3.Connection) -> None:
+    from grana_mcp.store import db as store_db
+
+    assert prices.search_term("Carne pra semana") == "carne"  # filler goes away: ambiguous
+    assert prices.search_term("Fralda Pampers G") == "fralda pampers g"
+    assert prices.search_term("Arroz tipo 1 5kg") == "arroz"
+    assert store_db.schema_version(conn) == 19
+
+    k = kt()
+    k.set_kitchen_rules(home_geohash="6gkzqf")
+    k.set_meal_plan(MEALS)
+    assert {j["term"] for j in k.price_jobs()["terms"]} == {"arroz", "feijao", "ovos", "banana"}
+
+    added = k.add_price_item("Fralda Pampers", gtin="7891234567890", category=42)
+    assert "termo 'fralda pampers'" in added["summary"]
+    k.add_price_item("carne")
+    k.add_price_item("arroz")  # already on the menu: must not become a second lookup
+    assert {i["term"] for i in k.price_items()["items"]} == {"fralda pampers", "carne", "arroz"}
+
+    jobs = k.price_jobs()
+    extras = {j["term"]: j for j in jobs["terms"] if j.get("extra")}
+    assert set(extras) == {"fralda pampers", "carne", "arroz"}
+    assert extras["fralda pampers"]["gtin"] == "7891234567890"
+    assert extras["fralda pampers"]["category"] == 42
+    assert extras["carne"]["category"] is None
+    assert jobs["total"] == 6  # four menu items plus two new ones
+
+    prices.set_category(conn, "fralda pampers", 99)
+    conn.commit()
+    k.add_price_item("Fralda Pampers", category=7)  # explicit choice wins over cached 99
+    job = next(j for j in k.price_jobs()["terms"] if j["term"] == "fralda pampers")
+    assert job["category"] == 7
+
+    with pytest.raises(store.KitchenError, match="gtin"):
+        k.add_price_item("x", gtin="abc")
+    assert "Tirei" in k.remove_price_item("carne")["summary"]
+    assert "carne" not in {j["term"] for j in k.price_jobs()["terms"]}
+
+    k.log_lookup(
+        {"total": 1, "ok": 0, "offers": 0, "failed": 0, "ambiguous": ["carne: Carnes, Frios"]}
+    )
+    assert k.price_status()["last_phone_lookup"]["ambiguous"] == "carne: Carnes, Frios"
 
 
 def test_server_lookup_stops_on_scrambled_answer(conn: sqlite3.Connection) -> None:
@@ -754,7 +854,7 @@ def test_food_diary_streaks_and_weekly_score(conn: sqlite3.Connection) -> None:
         lambda: k.delete_meal(out["id"]),
         lambda: k.log_meal("ceia", "x", 100),
         lambda: k.log_meal("jantar", "x", 9000),
-        lambda: k.log_meal("jantar", "x", "muito"),
+        lambda: k.log_meal("jantar", "x", "muito"),  # type: ignore[arg-type]
         lambda: k.log_meal("jantar", "x", 100, protein_g=900),
         lambda: k.log_meal("jantar", "  ", 100),
         lambda: k.log_meal("jantar", "x", 100, day="2026-11-01"),  # too far back
@@ -764,7 +864,7 @@ def test_food_diary_streaks_and_weekly_score(conn: sqlite3.Connection) -> None:
         lambda: k.food_diary("ontem"),
     ):
         with pytest.raises(store.KitchenError):
-            bad()
+            bad()  # type: ignore[no-untyped-call]
 
 
 def test_streak_runs() -> None:

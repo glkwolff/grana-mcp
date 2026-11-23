@@ -1127,9 +1127,10 @@ def _register_device_tools(server: MCPServer) -> None:
     @server.tool(
         annotations=_RO,
         description="Pede ao celular de quem está conversando para buscar no Menor Preço os "
-        "preços de hoje dos itens do cardápio da semana (pela internet de casa, devagar, ~3 s "
-        "por item; para sozinho se o Menor Preço recusar). Use antes de shopping_list quando "
-        "faltar preço de hoje.",
+        "preços de hoje dos itens do cardápio da semana e dos itens avulsos anotados com "
+        "add_price_item (pela internet de casa, devagar, ~3 s por item; para sozinho se o "
+        "Menor Preço recusar). Se algum item ficou ambíguo, o resultado diz quais categorias "
+        "apareceram — pergunte qual é a certa, anote com add_price_item de novo e repita.",
     )
     def request_prices() -> str:
         return "Busca de preços iniciada no celular; o app avisa quando terminar." + after
