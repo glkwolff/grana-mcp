@@ -174,7 +174,7 @@ def test_profiles_rules_and_logs(conn: sqlite3.Connection) -> None:
 
 # --- menu and shopping ---
 
-MEALS = [
+MEALS: list[dict[str, Any]] = [
     {
         "day": 0, "meal": "almoco", "title": "Arroz, feijão e ovo", "kcal": 650, "protein_g": 30,
         "ingredients": [
@@ -461,7 +461,7 @@ def test_menor_preco_retries_dropped_connections(monkeypatch: pytest.MonkeyPatch
     calls.clear()
 
     def always(request: httpx.Request) -> httpx.Response:
-        calls.append(1)
+        calls.append("x")
         raise httpx.ConnectTimeout("dropped", request=request)
 
     mp = prices.MenorPreco(httpx.Client(transport=httpx.MockTransport(always)))
@@ -602,9 +602,7 @@ def test_extra_price_items_from_chat(conn: sqlite3.Connection) -> None:
     assert "termo 'fralda pampers'" in added["summary"]
     k.add_price_item("carne")
     k.add_price_item("arroz")  # already on the menu: must not become a second lookup
-    assert {i["term"] for i in k.price_items()["items"]} == {
-        "fralda pampers", "carne", "arroz"
-    }
+    assert {i["term"] for i in k.price_items()["items"]} == {"fralda pampers", "carne", "arroz"}
 
     jobs = k.price_jobs()
     extras = {j["term"]: j for j in jobs["terms"] if j.get("extra")}
@@ -625,8 +623,9 @@ def test_extra_price_items_from_chat(conn: sqlite3.Connection) -> None:
     assert "Tirei" in k.remove_price_item("carne")["summary"]
     assert "carne" not in {j["term"] for j in k.price_jobs()["terms"]}
 
-    k.log_lookup({"total": 1, "ok": 0, "offers": 0, "failed": 0,
-                  "ambiguous": ["carne: Carnes, Frios"]})
+    k.log_lookup(
+        {"total": 1, "ok": 0, "offers": 0, "failed": 0, "ambiguous": ["carne: Carnes, Frios"]}
+    )
     assert k.price_status()["last_phone_lookup"]["ambiguous"] == "carne: Carnes, Frios"
 
 
@@ -849,7 +848,7 @@ def test_food_diary_streaks_and_weekly_score(conn: sqlite3.Connection) -> None:
         lambda: k.delete_meal(out["id"]),
         lambda: k.log_meal("ceia", "x", 100),
         lambda: k.log_meal("jantar", "x", 9000),
-        lambda: k.log_meal("jantar", "x", "muito"),
+        lambda: k.log_meal("jantar", "x", "muito"),  # type: ignore[arg-type]
         lambda: k.log_meal("jantar", "x", 100, protein_g=900),
         lambda: k.log_meal("jantar", "  ", 100),
         lambda: k.log_meal("jantar", "x", 100, day="2026-11-01"),  # too far back
@@ -859,7 +858,7 @@ def test_food_diary_streaks_and_weekly_score(conn: sqlite3.Connection) -> None:
         lambda: k.food_diary("ontem"),
     ):
         with pytest.raises(store.KitchenError):
-            bad()
+            bad()  # type: ignore[no-untyped-call]
 
 
 def test_streak_runs() -> None:

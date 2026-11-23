@@ -1130,7 +1130,7 @@ def _register_device_tools(server: MCPServer) -> None:
         "preços de hoje dos itens do cardápio da semana e dos itens avulsos anotados com "
         "add_price_item (pela internet de casa, devagar, ~3 s por item; para sozinho se o "
         "Menor Preço recusar). Se algum item ficou ambíguo, o resultado diz quais categorias "
-        "apareceram — pergunte qual é a certa, anote com add_price_item de novo e repita."
+        "apareceram — pergunte qual é a certa, anote com add_price_item de novo e repita.",
     )
     def request_prices() -> str:
         return "Busca de preços iniciada no celular; o app avisa quando terminar." + after

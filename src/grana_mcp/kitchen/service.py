@@ -775,9 +775,7 @@ class KitchenTools:
                 "SELECT search, label, gtin, category FROM price_extra_terms ORDER BY created_at"
             ).fetchall()
 
-            def job_for(
-                t: str, into: dict[str, dict[str, Any]], extra: Any = None
-            ) -> None:
+            def job_for(t: str, into: dict[str, dict[str, Any]], extra: Any = None) -> None:
                 if prices.fetched_today(conn, t, today):
                     return
                 job: dict[str, Any] = {"term": t, "category": prices.category_of(conn, t)}
@@ -942,9 +940,7 @@ class KitchenTools:
         reason = sanitize_text(str(stopped), 200) if stopped else None
         raw_ambiguous = report.get("ambiguous")
         if isinstance(raw_ambiguous, list):
-            ambiguous = sanitize_text(
-                ", ".join(str(x) for x in raw_ambiguous[:8]), 200
-            ) or None
+            ambiguous = sanitize_text(", ".join(str(x) for x in raw_ambiguous[:8]), 200) or None
         else:
             ambiguous = sanitize_text(str(raw_ambiguous), 200) if raw_ambiguous else None
 

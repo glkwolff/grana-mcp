@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import date
+from typing import Any
 
 import pytest
 
@@ -82,7 +83,7 @@ def kitchen() -> KitchenTools:
     return KitchenTools(config.db_path(), lambda: TODAY, lambda: "ana", receipts=fetch)
 
 
-SUGGESTED = [
+SUGGESTED: list[dict[str, Any]] = [
     {"product": "ARROZ T1 TIO EXEMPLO 5KG", "category": "mercearia", "size": None, "unit": None},
     {"product": "TOMATE ITALIANO", "category": "hortifruti", "size": None, "unit": None},
     {"product": "FRALDA EXEMPLO XG 116", "category": "bebe", "size": 116, "unit": "un"},
