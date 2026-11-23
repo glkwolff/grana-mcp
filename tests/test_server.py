@@ -22,8 +22,9 @@ from grana_mcp.store import db
 TODAY = date(2026, 11, 15)
 KITCHEN_TOOLS = {
     "kitchen_status", "set_diet_profile", "set_kitchen_rules", "log_weight", "log_day",
-    "set_meal_plan", "meal_plan", "shopping_list", "find_prices", "markets", "set_market",
-    "note_price", "set_brand", "set_unit_weight", "log_meal", "delete_meal", "food_diary",
+    "set_meal_plan", "meal_plan", "shopping_list", "find_prices", "add_price_item",
+    "remove_price_item", "price_items", "markets", "set_market", "note_price", "set_brand",
+    "set_unit_weight", "log_meal", "delete_meal", "food_diary",
     "grocery_spending", "product_review", "set_product_category", "set_product_size",
     "confirm_products", "water_today", "log_water", "undo_water", "set_water_goal",
 }  # fmt: skip
@@ -407,7 +408,7 @@ def test_mcp_registration(conn: sqlite3.Connection) -> None:
                    "post_notice", "delete_notice", "remember", "forget",
                    *(KITCHEN_TOOLS - {"kitchen_status", "meal_plan", "food_diary",
                                       "grocery_spending", "product_review",
-                                      "water_today"})}  # fmt: skip
+                                      "water_today", "price_items"})}  # fmt: skip
         assert t.annotations.read_only_hint is (t.name not in writers)
     for name in ("spending_summary", "top_merchants", "find_transactions", "excluded_items",
                  "overview", "explain_category", "household_context"):  # fmt: skip

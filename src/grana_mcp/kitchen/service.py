@@ -47,6 +47,7 @@ RECEIPT_PHOTO = (
 )
 PHONE_MAX_TERMS = 40
 PHONE_MAX_ITEMS = 80
+MAX_EXTRA_TERMS = 8  # chat items that are not on the menu; each one costs a lookup
 MARKETS_FRESH_DAYS = 30
 PRICE_UNITS = {"g": ("kg", 0.001), "kg": ("kg", 1.0), "ml": ("l", 0.001), "l": ("l", 1.0),
                "un": ("un", 1.0), "dz": ("un", 12.0)}  # fmt: skip
@@ -761,29 +762,136 @@ class KitchenTools:
         }
 
     def price_jobs(self, week_start: str | None = None) -> dict[str, Any]:
-        """What the phone should look up today: the week's items without a price fetched
-        today, with the cached category of each (saves a request per item)."""
+        """What the phone should look up today: the week's items and the extras asked for
+        in chat, without a price fetched today. Categories and barcodes go along to save
+        requests and to keep ambiguous items from being searched blindly."""
         today = self.today()
         with self._conn() as conn:
             rules = store.rules(conn)
             if rules is None or not rules["home_geohash"]:
                 raise store.KitchenError("sem localização: peça com request_location")
             wanted = self._price_terms(conn, week_start)
-            terms = []
-            for t in wanted:
+            extras = conn.execute(
+                "SELECT search, label, gtin, category FROM price_extra_terms ORDER BY created_at"
+            ).fetchall()
+
+            def job_for(
+                t: str, into: dict[str, dict[str, Any]], extra: Any = None
+            ) -> None:
                 if prices.fetched_today(conn, t, today):
-                    continue
-                b = prices.brand_of(conn, t)
+                    return
                 job: dict[str, Any] = {"term": t, "category": prices.category_of(conn, t)}
+                if extra is not None:
+                    job["label"] = str(extra["label"])
+                    job["extra"] = True
+                    if extra["gtin"]:
+                        job["gtin"] = str(extra["gtin"])
+                    if extra["category"]:  # the choice made in chat wins over a cached one
+                        job["category"] = int(extra["category"])
+                b = prices.brand_of(conn, t)
                 if b:  # Menor Preço: "product name, brand or barcode" in the same field
                     job["query"] = f"{t} {b[0]}"
-                terms.append(job)
+                into[t] = job  # one lookup per term, even if it is also on the menu
+
+            jobs: dict[str, dict[str, Any]] = {}
+            for t in wanted:
+                job_for(t, jobs)
+            for extra in extras:
+                job_for(str(extra["search"]), jobs, extra)
         return {
             "geohash": rules["home_geohash"],
             "radius_km": rules["radius_km"],
-            "terms": terms[:PHONE_MAX_TERMS],
-            "total": len(wanted),
-            "menu": bool(wanted),
+            "terms": list(jobs.values())[:PHONE_MAX_TERMS],
+            "total": len(jobs),
+            "menu": bool(wanted or extras),
+        }
+
+    def add_price_item(
+        self,
+        item: str,
+        brand: str | None = None,
+        gtin: str | None = None,
+        category: int | None = None,
+    ) -> dict[str, Any]:
+        """Register something else the house wants priced ('fralda pampers'), even if it is
+        not on the menu. The exact term is returned so it can be corrected before the phone
+        spends a lookup on it; an ambiguous one is reported back with its categories."""
+        term = prices.search_term(str(item or ""))
+        if not term:
+            raise store.KitchenError("diga o produto")
+        if brand:
+            term = prices.search_term(f"{term} {prices.fold(str(brand))}")
+        code = str(gtin or "").strip()
+        if code and (not code.isdigit() or not 8 <= len(code) <= 14):
+            raise store.KitchenError("gtin: 8 a 14 dígitos")
+        cat: int | None = None
+        if category is not None:
+            if isinstance(category, bool):
+                raise store.KitchenError("categoria inválida")
+            try:
+                cat = int(category)
+            except (TypeError, ValueError):
+                raise store.KitchenError("categoria inválida") from None
+            if cat <= 0:
+                raise store.KitchenError("categoria inválida")
+        label = sanitize_text(str(item), 60) or term
+
+        def do(conn: sqlite3.Connection) -> str:
+            known = conn.execute(
+                "SELECT 1 FROM price_extra_terms WHERE search = ?", (term,)
+            ).fetchone()
+            if not known:
+                count = conn.execute("SELECT COUNT(*) FROM price_extra_terms").fetchone()[0]
+                if count >= MAX_EXTRA_TERMS:
+                    raise store.KitchenError(
+                        f"no máximo {MAX_EXTRA_TERMS} itens avulsos; remova um antes"
+                    )
+            conn.execute(
+                "INSERT INTO price_extra_terms (search, label, gtin, category, created_at, "
+                "created_by) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (search) DO UPDATE SET "
+                "label = excluded.label, "
+                "gtin = COALESCE(excluded.gtin, price_extra_terms.gtin), "
+                "category = COALESCE(excluded.category, price_extra_terms.category), "
+                "created_at = excluded.created_at, created_by = excluded.created_by",
+                (term, label, code or None, cat, now_utc(), self.actor()),
+            )
+            conn.execute("DELETE FROM price_fetch WHERE search = ?", (term,))  # look it up again
+            conn.commit()
+            bits = [f"termo '{term}'"]
+            if code:
+                bits.append(f"código {code}")
+            if cat:
+                bits.append(f"categoria {cat}")
+            return "Anotei " + ", ".join(bits) + ". Confira antes de pedir a busca no celular."
+
+        return self._write(do)
+
+    def remove_price_item(self, item: str) -> dict[str, Any]:
+        term = prices.search_term(str(item or ""))
+        if not term:
+            raise store.KitchenError("diga o produto")
+
+        def do(conn: sqlite3.Connection) -> str:
+            cur = conn.execute("DELETE FROM price_extra_terms WHERE search = ?", (term,))
+            conn.commit()
+            if not cur.rowcount:
+                return f"'{term}' não estava entre os itens avulsos."
+            return f"Tirei '{term}' dos itens avulsos."
+
+        return self._write(do)
+
+    def price_items(self) -> dict[str, Any]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT label, search, gtin, category FROM price_extra_terms ORDER BY created_at"
+            ).fetchall()
+        items = [
+            {"label": r["label"], "term": r["search"], "gtin": r["gtin"], "category": r["category"]}
+            for r in rows
+        ]
+        return {
+            "items": items,
+            "summary": ", ".join(i["term"] for i in items) or "nenhum item avulso",
         }
 
     def _price_terms(self, conn: sqlite3.Connection, week_start: str | None) -> list[str]:
@@ -807,14 +915,15 @@ class KitchenTools:
             terms = self._price_terms(conn, None)
             done = [t for t in terms if prices.fetched_today(conn, t, today)]
             last = conn.execute(
-                "SELECT at, user, total, ok, offers, failed, stopped FROM price_lookups "
-                "ORDER BY id DESC LIMIT 1"
+                "SELECT at, user, total, ok, offers, failed, stopped, ambiguous "
+                "FROM price_lookups ORDER BY id DESC LIMIT 1"
             ).fetchone()
         out: dict[str, Any] = {"items": len(terms), "with_price_today": len(done)}
         if last:
             out["last_phone_lookup"] = {
                 "at": last[0], "by": last[1], "items": last[2], "ok": last[3],
                 "prices": last[4], "failed": last[5], "stopped": last[6],
+                "ambiguous": last[7],
             }  # fmt: skip
         return out
 
@@ -831,13 +940,21 @@ class KitchenTools:
 
         stopped = report.get("stopped")
         reason = sanitize_text(str(stopped), 200) if stopped else None
+        raw_ambiguous = report.get("ambiguous")
+        if isinstance(raw_ambiguous, list):
+            ambiguous = sanitize_text(
+                ", ".join(str(x) for x in raw_ambiguous[:8]), 200
+            ) or None
+        else:
+            ambiguous = sanitize_text(str(raw_ambiguous), 200) if raw_ambiguous else None
 
         def do(conn: sqlite3.Connection) -> str:
             conn.execute(
-                "INSERT INTO price_lookups (at, user, total, ok, offers, failed, stopped) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (now_utc(), self.actor(), n("total"), n("ok"), n("offers"), n("failed"), reason),
-            )
+                "INSERT INTO price_lookups (at, user, total, ok, offers, failed, stopped, "
+                "ambiguous) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (now_utc(), self.actor(), n("total"), n("ok"), n("offers"), n("failed"),
+                 reason, ambiguous),
+            )  # fmt: skip
             conn.execute(
                 "DELETE FROM price_lookups WHERE id NOT IN "
                 "(SELECT id FROM price_lookups ORDER BY id DESC LIMIT 200)"
