@@ -557,6 +557,8 @@ def poisoned(items: list[dict[str, Any]]) -> bool:
 
 
 def category_of(conn: sqlite3.Connection, term: str) -> int | None:
+    """Cached category id, or 0 when we already learned there is no single one (never sent
+    to the source). None means it still has to be looked up."""
     row = conn.execute("SELECT category FROM price_category WHERE search = ?", (term,)).fetchone()
     return int(row[0]) if row else None
 

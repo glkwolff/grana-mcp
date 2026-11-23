@@ -60,6 +60,10 @@ O navegador do celular faz as mesmas consultas públicas, em ritmo humano (1 ped
 `GRANA_PRICES` fica desligado e recebe só os resultados. O cliente em `web-ui/src/phonePrices.js`
 usa `data=2` (semana, compatível com a janela de 7 dias usada ao decidir se um preço ainda
 vale), `ordem=0`, uma página, e `categoria` somente quando `/categorias` devolve exatamente uma.
+Quando não há categoria única, o cliente guarda `0` como marcação de "já verifiquei": o `0`
+nunca é enviado como `categoria`, mas poupa uma nova consulta a `/categorias` no dia seguinte.
+Conexões travadas são abortadas em 6 s (com uma nova tentativa), em vez de prender a fila por
+15 s. A taxa continua a mesma: um pedido a cada 3 s ao Menor Preço, sem acelerar.
 
 Itens avulsos pedidos no chat (fralda, por exemplo) entram na mesma fila por
 `add_price_item(item, brand?, gtin?, category?)`. Antes de anotar, o assistente deve perguntar

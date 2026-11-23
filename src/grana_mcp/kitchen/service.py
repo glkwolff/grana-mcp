@@ -973,7 +973,9 @@ class KitchenTools:
                 "consultas): busca parada por hoje"
             )
         with self._conn() as conn:
-            if isinstance(category, int) and not isinstance(category, bool) and category > 0:
+            # 0 is the phone's "no single category" cache marker: never sent to the source,
+            # but it saves asking /categorias again for a term we already checked.
+            if isinstance(category, int) and not isinstance(category, bool) and category >= 0:
                 prices.set_category(conn, term, category)
             n = prices.store_results(conn, term, rows)
         return {"ok": True, "term": term, "offers": n}

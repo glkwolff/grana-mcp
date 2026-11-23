@@ -548,6 +548,12 @@ def test_prices_looked_up_by_the_phone(conn: sqlite3.Connection, tmp_path: Any) 
     after = k.price_jobs()
     assert after["terms"] == []  # all looked up today: the phone has nothing to do
     assert prices.category_of(conn, "arroz") == 7  # next time: one request less
+    # "no single category" is cached too, so the phone doesn't ask /categorias again
+    assert k.store_phone_prices("banana", 0, CATALOG["banana"])["ok"]
+    assert prices.category_of(conn, "banana") == 0
+    next_day = KitchenTools(config.db_path(), lambda: date(2026, 11, 19))
+    again = next(j for j in next_day.price_jobs()["terms"] if j["term"] == "banana")
+    assert again["category"] == 0
     out = k.shopping_list(refresh=False)
     assert out["estimated_total"] and "hoje" in out["prices"]
 

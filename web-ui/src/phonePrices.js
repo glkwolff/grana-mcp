@@ -22,7 +22,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let last = 0;
 let running = null;
 
-const TIMEOUT_MS = 15000; // the service silently drops some connections; don't hang on them
+const TIMEOUT_MS = 6000; // the service silently drops some connections; don't hang on them
 
 async function mp(path, params) {
   for (let attempt = 0; ; attempt++) {
@@ -106,10 +106,11 @@ async function run(onProgress) {
             ambiguous.push(`${label || term}: ${names}`);
             skipped = true;
           } else {
-            cat = dominant(categories);
+            // 0 is our cacheable "no single category applies": skip this request next time.
+            cat = dominant(categories) ?? 0;
           }
         }
-        if (cat) params.categoria = cat;
+        if (cat > 0) params.categoria = cat;
       }
       if (!skipped) {
         const items = (await mp("produtos", params)).produtos || [];
